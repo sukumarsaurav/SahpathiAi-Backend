@@ -34,11 +34,13 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(helmet());
 app.use(cors({
-    origin: process.env.CLIENT_URL || (process.env.NODE_ENV === 'production' ? 'https://sahpathi-ai.vercel.app' : 'http://localhost:5173'),
+    origin: [
+        'https://sahpathi-ai.vercel.app',
+        'https://sahpathi.ai',
+        process.env.CLIENT_URL
+    ].filter((origin): origin is string => !!origin),
     credentials: true
 }));
-app.use(express.json());
-
 // Health check
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
