@@ -1,0 +1,1361 @@
+
+import express from 'express';
+// Use supabaseAdmin for ALL admin routes to bypass RLS policies
+import { supabaseAdmin as supabase } from '../db/supabase';
+import { requireAdmin } from '../middleware/adminAuth';
+import { authenticate } from '../middleware/auth';
+
+const router = express.Router();
+
+
+// Apply auth middleware to all admin routes
+router.use(authenticate);
+router.use(requireAdmin);
+
+// --- EXAM CATEGORIES ---
+
+// GET /api/admin/categories
+router.get('/categories', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('exam_categories')
+            .select('*')
+            .order('name');
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching categories:', error);
+        res.status(500).json({ error: 'Failed to fetch categories' });
+    }
+});
+
+// POST /api/admin/categories
+router.post('/categories', async (req, res) => {
+    try {
+        const { name, icon_url } = req.body;
+        const { data, error } = await supabase
+            .from('exam_categories')
+            .insert({ name, icon_url })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating category:', error);
+        res.status(500).json({ error: 'Failed to create category' });
+    }
+});
+
+// PUT /api/admin/categories/:id
+router.put('/categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, icon_url } = req.body;
+        const { error } = await supabase
+            .from('exam_categories')
+            .update({ name, icon_url })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating category:', error);
+        res.status(500).json({ error: 'Failed to update category' });
+    }
+});
+
+// DELETE /api/admin/categories/:id
+router.delete('/categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('exam_categories')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting category:', error);
+        res.status(500).json({ error: 'Failed to delete category' });
+    }
+});
+
+// --- EXAMS ---
+
+// GET /api/admin/exams
+router.get('/exams', async (req, res) => {
+    try {
+        const { categoryId } = req.query;
+        let query = supabase
+            .from('exams')
+            .select(`
+                *,
+                category:exam_categories (id, name)
+            `)
+            .order('name');
+
+        if (categoryId) {
+            query = query.eq('category_id', categoryId);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching exams:', error);
+        res.status(500).json({ error: 'Failed to fetch exams' });
+    }
+});
+
+// POST /api/admin/exams
+router.post('/exams', async (req, res) => {
+    try {
+        const { name, category_id, icon_url, description } = req.body;
+        const { data, error } = await supabase
+            .from('exams')
+            .insert({ name, category_id, icon_url, description })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating exam:', error);
+        res.status(500).json({ error: 'Failed to create exam' });
+    }
+});
+
+// PUT /api/admin/exams/:id
+router.put('/exams/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, category_id, icon_url, description } = req.body;
+        const { error } = await supabase
+            .from('exams')
+            .update({ name, category_id, icon_url, description })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating exam:', error);
+        res.status(500).json({ error: 'Failed to update exam' });
+    }
+});
+
+// DELETE /api/admin/exams/:id
+router.delete('/exams/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('exams')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting exam:', error);
+        res.status(500).json({ error: 'Failed to delete exam' });
+    }
+});
+
+// --- SUBJECTS ---
+
+// GET /api/admin/subjects
+// Get all global subjects
+router.get('/subjects', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('subjects')
+            .select('*')
+            .order('name');
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching subjects:', error);
+        res.status(500).json({ error: 'Failed to fetch subjects' });
+    }
+});
+
+// POST /api/admin/subjects
+router.post('/subjects', async (req, res) => {
+    try {
+        const { name, icon, color, description } = req.body;
+        const { data, error } = await supabase
+            .from('subjects')
+            .insert({ name, icon, color, description })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating subject:', error);
+        res.status(500).json({ error: 'Failed to create subject' });
+    }
+});
+
+// PUT /api/admin/subjects/:id
+router.put('/subjects/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, icon, color, description } = req.body;
+        const { error } = await supabase
+            .from('subjects')
+            .update({ name, icon, color, description })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating subject:', error);
+        res.status(500).json({ error: 'Failed to update subject' });
+    }
+});
+
+// DELETE /api/admin/subjects/:id
+router.delete('/subjects/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('subjects')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting subject:', error);
+        res.status(500).json({ error: 'Failed to delete subject' });
+    }
+});
+
+// --- EXAM SUBJECTS (Linking) ---
+
+// GET /api/admin/exam-subjects
+// Get subjects linked to a specific exam
+router.get('/exam-subjects/:examId', async (req, res) => {
+    try {
+        const { examId } = req.params;
+        const { data, error } = await supabase
+            .from('exam_subjects')
+            .select(`
+                id,
+                exam_id,
+                subject_id,
+                subject:subjects (id, name, icon, color),
+                exam:exams (id, name)
+            `)
+            .eq('exam_id', examId)
+            .order('created_at'); // or display_order
+
+        if (error) throw error;
+
+        // Flatten the response for easier use
+        const flattenedData = data.map((item: any) => ({
+            id: item.id,
+            exam_id: item.exam_id,
+            subject_id: item.subject_id,
+            subject_name: item.subject?.name || 'Unknown',
+            exam_name: item.exam?.name || 'Unknown',
+            subject: item.subject,
+            exam: item.exam
+        }));
+
+        res.json(flattenedData);
+    } catch (error) {
+        console.error('Error fetching exam subjects:', error);
+        res.status(500).json({ error: 'Failed to fetch exam subjects' });
+    }
+});
+
+// POST /api/admin/exam-subjects
+// Link a subject to an exam
+router.post('/exam-subjects', async (req, res) => {
+    try {
+        const { exam_id, subject_id } = req.body;
+        const { data, error } = await supabase
+            .from('exam_subjects')
+            .insert({ exam_id, subject_id })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error linking subject:', error);
+        res.status(500).json({ error: 'Failed to link subject' });
+    }
+});
+
+// DELETE /api/admin/exam-subjects/:id
+// Unlink a subject from an exam (delete the relationship)
+router.delete('/exam-subjects/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('exam_subjects')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error unlinking subject:', error);
+        res.status(500).json({ error: 'Failed to unlink subject' });
+    }
+});
+
+
+// --- TOPICS ---
+
+// GET /api/admin/topics
+// Get topics for a specific subject (master list)
+router.get('/topics', async (req, res) => {
+    try {
+        const { subjectId } = req.query;
+        let query = supabase.from('topics').select('*').order('name');
+
+        if (subjectId) {
+            query = query.eq('subject_id', subjectId);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching topics:', error);
+        res.status(500).json({ error: 'Failed to fetch topics' });
+    }
+});
+
+// POST /api/admin/topics
+router.post('/topics', async (req, res) => {
+    try {
+        const { subject_id, name, description, exam_id } = req.body;
+        const { data, error } = await supabase
+            .from('topics')
+            .insert({ subject_id, name, description, exam_id }) // exam_id optional
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating topic:', error);
+        res.status(500).json({ error: 'Failed to create topic' });
+    }
+});
+
+// PUT /api/admin/topics/:id
+router.put('/topics/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { subject_id, name, description, exam_id } = req.body;
+        const { error } = await supabase
+            .from('topics')
+            .update({ subject_id, name, description, exam_id })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating topic:', error);
+        res.status(500).json({ error: 'Failed to update topic' });
+    }
+});
+
+// DELETE /api/admin/topics/:id
+router.delete('/topics/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('topics')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting topic:', error);
+        res.status(500).json({ error: 'Failed to delete topic' });
+    }
+});
+
+// GET /api/admin/topics/by-exam-subject/:examSubjectId
+// Get topics for a specific exam-subject combination
+router.get('/topics/by-exam-subject/:examSubjectId', async (req, res) => {
+    try {
+        const { examSubjectId } = req.params;
+
+        // First get the exam_subject to find subject_id and exam_id
+        const { data: examSubject, error: esError } = await supabase
+            .from('exam_subjects')
+            .select('subject_id, exam_id')
+            .eq('id', examSubjectId)
+            .single();
+
+        if (esError) throw esError;
+
+        // Get topics for this subject and exam combination
+        let query = supabase
+            .from('topics')
+            .select('*')
+            .eq('subject_id', examSubject.subject_id)
+            .order('name');
+
+        // Filter by exam_id if topic has it set, or include topics with null exam_id (general topics)
+        query = query.or(`exam_id.eq.${examSubject.exam_id},exam_id.is.null`);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching topics by exam subject:', error);
+        res.status(500).json({ error: 'Failed to fetch topics' });
+    }
+});
+
+// --- QUESTIONS ---
+
+// GET /api/admin/questions - List questions with pagination & filtering
+router.get('/questions', async (req, res) => {
+    try {
+        const {
+            page = 1,
+            limit = 10,
+            topicId,
+            subjectId,
+            difficulty,
+            sortBy = 'created_at',
+            sortOrder = 'desc',
+            search
+        } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        // If subjectId is provided, first get all topic IDs for that subject
+        let topicIdsForSubject: string[] = [];
+        if (subjectId) {
+            const { data: subjectTopics } = await supabase
+                .from('topics')
+                .select('id')
+                .eq('subject_id', subjectId);
+            topicIdsForSubject = subjectTopics?.map((t: any) => t.id) || [];
+        }
+
+        // Build base query
+        let query = supabase
+            .from('questions')
+            .select(`
+                id,
+                topic_id,
+                difficulty,
+                correct_answer_index,
+                is_active,
+                created_at
+            `, { count: 'exact' });
+
+        // Apply topic filter
+        if (topicId) {
+            query = query.eq('topic_id', topicId);
+        } else if (subjectId && topicIdsForSubject.length > 0) {
+            // Filter by all topics belonging to the subject
+            query = query.in('topic_id', topicIdsForSubject);
+        }
+
+        // Apply difficulty filter
+        if (difficulty) {
+            query = query.eq('difficulty', difficulty);
+        }
+
+        // Apply sorting
+        if (sortBy === 'difficulty') {
+            // For difficulty sorting, we'll sort alphabetically (easy, hard, medium)
+            // To get proper order: easy < medium < hard, we use ascending for easy-first
+            query = query.order('difficulty', { ascending: sortOrder === 'asc' });
+        } else {
+            // Default to created_at sorting
+            query = query.order('created_at', { ascending: sortOrder === 'asc' });
+        }
+
+        // Apply pagination
+        query = query.range(offset, offset + Number(limit) - 1);
+
+        const { data: questionsData, error: questionsError, count } = await query;
+
+        if (questionsError) {
+            console.error('Questions query error:', questionsError);
+            throw questionsError;
+        }
+
+        if (!questionsData || questionsData.length === 0) {
+            return res.json({ questions: [], total: count || 0 });
+        }
+
+        // Get topic IDs from questions
+        const topicIds = [...new Set(questionsData.map((q: any) => q.topic_id).filter(Boolean))];
+
+        // Fetch topics with subjects
+        let topicsMap: Record<string, any> = {};
+        if (topicIds.length > 0) {
+            const { data: topics } = await supabase
+                .from('topics')
+                .select('id, name, subject_id')
+                .in('id', topicIds);
+
+            if (topics) {
+                // Get subject IDs
+                const subjectIds = [...new Set(topics.map((t: any) => t.subject_id).filter(Boolean))];
+
+                // Fetch subjects
+                let subjectsMap: Record<string, string> = {};
+                if (subjectIds.length > 0) {
+                    const { data: subjects } = await supabase
+                        .from('subjects')
+                        .select('id, name')
+                        .in('id', subjectIds);
+                    if (subjects) {
+                        subjects.forEach((s: any) => { subjectsMap[s.id] = s.name; });
+                    }
+                }
+
+                topics.forEach((t: any) => {
+                    topicsMap[t.id] = { name: t.name, subject_name: subjectsMap[t.subject_id] || null };
+                });
+            }
+        }
+
+        // Fetch English language ID for prioritization
+        let englishLanguageId: string | null = null;
+        const { data: englishLang } = await supabase
+            .from('languages')
+            .select('id')
+            .eq('code', 'en')
+            .single();
+        if (englishLang) {
+            englishLanguageId = englishLang.id;
+        }
+
+        // Fetch translations with language info
+        const questionIds = questionsData.map((q: any) => q.id);
+        const { data: translations } = await supabase
+            .from('question_translations')
+            .select('question_id, question_text, language_id')
+            .in('question_id', questionIds);
+
+        // Group translations by question_id
+        const translationsMap: Record<string, any[]> = {};
+        if (translations) {
+            translations.forEach((t: any) => {
+                if (!translationsMap[t.question_id]) translationsMap[t.question_id] = [];
+                translationsMap[t.question_id].push(t);
+            });
+        }
+
+        // Transform data with English-first translation priority
+        const questions = questionsData.map((q: any) => {
+            const qTranslations = translationsMap[q.id] || [];
+
+            // Prioritize English translation
+            let translation = null;
+            if (englishLanguageId) {
+                translation = qTranslations.find((t: any) => t.language_id === englishLanguageId);
+            }
+            // Fallback to first available translation
+            if (!translation && qTranslations.length > 0) {
+                translation = qTranslations[0];
+            }
+
+            const topicInfo = topicsMap[q.topic_id] || { name: null, subject_name: null };
+
+            return {
+                id: q.id,
+                difficulty: q.difficulty,
+                correct_answer_index: q.correct_answer_index,
+                is_active: q.is_active,
+                created_at: q.created_at,
+                question_text: translation?.question_text || '(No translation)',
+                topic_name: topicInfo.name || '(No topic)',
+                subject_name: topicInfo.subject_name || '(No subject)'
+            };
+        });
+
+        res.json({ questions, total: count || 0 });
+    } catch (error) {
+        console.error('Error fetching questions:', error);
+        res.status(500).json({ error: 'Failed to fetch questions' });
+    }
+});
+
+// GET /api/admin/questions/:id - Get single question details
+router.get('/questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // First, get the question
+        const { data: question, error: qError } = await supabase
+            .from('questions')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (qError) {
+            console.error('Error fetching question:', qError);
+            throw qError;
+        }
+
+        // Get topic if exists
+        let topic = null;
+        if (question.topic_id) {
+            const { data: topicData } = await supabase
+                .from('topics')
+                .select('id, name, subject_id')
+                .eq('id', question.topic_id)
+                .single();
+            topic = topicData;
+        }
+
+        // Get translations
+        const { data: translations, error: tError } = await supabase
+            .from('question_translations')
+            .select(`
+                *,
+                language:languages (code, name)
+            `)
+            .eq('question_id', id);
+
+        if (tError) {
+            console.error('Error fetching translations:', tError);
+        }
+
+        res.json({
+            ...question,
+            topic,
+            translations: translations || []
+        });
+    } catch (error) {
+        console.error('Error fetching question:', error);
+        res.status(500).json({ error: 'Failed to fetch question' });
+    }
+});
+
+// POST /api/admin/questions - Create new question
+router.post('/questions', async (req, res) => {
+    try {
+        const { topic_id, difficulty, correct_answer_index, translations } = req.body;
+
+        // 1. Create Question Core
+        const { data: question, error: qError } = await supabase
+            .from('questions')
+            .insert({
+                topic_id,
+                difficulty,
+                correct_answer_index
+            })
+            .select()
+            .single();
+
+        if (qError) throw qError;
+
+        // 2. Create Translations
+        if (translations && translations.length > 0) {
+            const translationInserts = translations.map((t: any) => ({
+                question_id: question.id,
+                language_id: t.language_id,
+                question_text: t.question_text,
+                options: t.options,
+                explanation: t.explanation
+            }));
+
+            const { error: tError } = await supabase
+                .from('question_translations')
+                .insert(translationInserts);
+
+            if (tError) throw tError; // Note: If this fails, we have an orphan question. Transaction needed ideally.
+        }
+
+        res.status(201).json(question);
+    } catch (error) {
+        console.error('Error creating question:', error);
+        res.status(500).json({ error: 'Failed to create question' });
+    }
+});
+
+// PUT /api/admin/questions/:id
+router.put('/questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { topic_id, difficulty, correct_answer_index, translations } = req.body;
+
+        // 1. Update Core
+        const { error: qError } = await supabase
+            .from('questions')
+            .update({ topic_id, difficulty, correct_answer_index })
+            .eq('id', id);
+
+        if (qError) throw qError;
+
+        // 2. Update Translations (Upsert)
+        if (translations && translations.length > 0) {
+            const translationUpserts = translations.map((t: any) => ({
+                question_id: id,
+                language_id: t.language_id,
+                question_text: t.question_text,
+                options: t.options,
+                explanation: t.explanation,
+                // If it has an ID, keep it, else it's new
+                ...(t.id ? { id: t.id } : {})
+            }));
+
+            const { error: tError } = await supabase
+                .from('question_translations')
+                .upsert(translationUpserts);
+
+            if (tError) throw tError;
+        }
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating question:', error);
+        res.status(500).json({ error: 'Failed to update question' });
+    }
+});
+
+// DELETE /api/admin/questions/:id
+router.delete('/questions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('questions')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting question:', error);
+        res.status(500).json({ error: 'Failed to delete question' });
+    }
+});
+
+// POST /api/admin/questions/bulk - Bulk import questions from JSON
+router.post('/questions/bulk', async (req, res) => {
+    try {
+        const { questions, default_language_id, language_code_to_id, selected_language_ids } = req.body;
+
+        if (!Array.isArray(questions) || questions.length === 0) {
+            return res.status(400).json({ error: 'Questions array is required' });
+        }
+
+        const results = {
+            success: 0,
+            failed: 0,
+            errors: [] as string[],
+            created_question_ids: [] as string[]
+        };
+
+        for (let i = 0; i < questions.length; i++) {
+            const q = questions[i];
+            try {
+                // Validate required fields
+                if (!q.topic_id) {
+                    results.failed++;
+                    results.errors.push(`Question ${i + 1}: topic_id is required`);
+                    continue;
+                }
+                if (q.correct_answer_index === undefined || q.correct_answer_index < 0 || q.correct_answer_index > 3) {
+                    results.failed++;
+                    results.errors.push(`Question ${i + 1}: correct_answer_index must be 0-3`);
+                    continue;
+                }
+
+                // Check if this is multi-language format (has translations object)
+                const isMultiLanguage = q.translations && typeof q.translations === 'object' && !Array.isArray(q.translations);
+
+                if (isMultiLanguage) {
+                    // Multi-language format: q.translations = { "en": {...}, "hi": {...} }
+                    const translationCodes = Object.keys(q.translations);
+                    if (translationCodes.length === 0) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: translations object is empty`);
+                        continue;
+                    }
+
+                    // Validate all translations have required fields
+                    let hasValidTranslation = true;
+                    for (const code of translationCodes) {
+                        const t = q.translations[code];
+                        if (!t.question_text || !t.options || t.options.length !== 4) {
+                            results.failed++;
+                            results.errors.push(`Question ${i + 1}: translation '${code}' requires question_text and 4 options`);
+                            hasValidTranslation = false;
+                            break;
+                        }
+                    }
+                    if (!hasValidTranslation) continue;
+
+                    // 1. Create Question
+                    const { data: question, error: qError } = await supabase
+                        .from('questions')
+                        .insert({
+                            topic_id: q.topic_id,
+                            difficulty: q.difficulty || 'medium',
+                            correct_answer_index: q.correct_answer_index,
+                            is_active: q.is_active !== false
+                        })
+                        .select()
+                        .single();
+
+                    if (qError) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: ${qError.message}`);
+                        continue;
+                    }
+
+                    // 2. Create all translations
+                    let translationSuccess = true;
+                    for (const code of translationCodes) {
+                        const t = q.translations[code];
+                        // Get language ID from code mapping
+                        const languageId = language_code_to_id?.[code];
+                        if (!languageId) {
+                            results.errors.push(`Question ${i + 1}: Unknown language code '${code}', skipping this translation`);
+                            continue;
+                        }
+
+                        const { error: tError } = await supabase
+                            .from('question_translations')
+                            .insert({
+                                question_id: question.id,
+                                language_id: languageId,
+                                question_text: t.question_text,
+                                options: t.options,
+                                explanation: t.explanation || null
+                            });
+
+                        if (tError) {
+                            results.errors.push(`Question ${i + 1}: Translation '${code}' failed - ${tError.message}`);
+                            translationSuccess = false;
+                        }
+                    }
+
+                    if (!translationSuccess) {
+                        // At least one translation failed, but question was created
+                        // We'll still count as partial success
+                    }
+
+                    results.success++;
+                    results.created_question_ids.push(question.id);
+
+                } else {
+                    // Single language format
+                    if (!q.question_text || !q.options || q.options.length !== 4) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: question_text and 4 options are required`);
+                        continue;
+                    }
+
+                    // 1. Create Question
+                    const { data: question, error: qError } = await supabase
+                        .from('questions')
+                        .insert({
+                            topic_id: q.topic_id,
+                            difficulty: q.difficulty || 'medium',
+                            correct_answer_index: q.correct_answer_index,
+                            is_active: q.is_active !== false
+                        })
+                        .select()
+                        .single();
+
+                    if (qError) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: ${qError.message}`);
+                        continue;
+                    }
+
+                    // 2. Create Translation for the selected language
+                    const languageId = q.language_id || default_language_id;
+                    if (languageId) {
+                        const { error: tError } = await supabase
+                            .from('question_translations')
+                            .insert({
+                                question_id: question.id,
+                                language_id: languageId,
+                                question_text: q.question_text,
+                                options: q.options,
+                                explanation: q.explanation || null
+                            });
+
+                        if (tError) {
+                            results.failed++;
+                            results.errors.push(`Question ${i + 1}: Translation failed - ${tError.message}`);
+                            // Delete orphan question
+                            await supabase.from('questions').delete().eq('id', question.id);
+                            continue;
+                        }
+                    }
+
+                    results.success++;
+                    results.created_question_ids.push(question.id);
+                }
+
+                // Update topic question count (optional, ignore errors)
+                try {
+                    await supabase.rpc('increment_topic_question_count', { p_topic_id: q.topic_id });
+                } catch { }
+
+            } catch (err: any) {
+                results.failed++;
+                results.errors.push(`Question ${i + 1}: ${err.message || 'Unknown error'}`);
+            }
+        }
+
+        res.json({
+            message: `Imported ${results.success} questions, ${results.failed} failed`,
+            ...results
+        });
+    } catch (error) {
+        console.error('Bulk import error:', error);
+        res.status(500).json({ error: 'Bulk import failed' });
+    }
+});
+
+
+// --- METADATA HELPERS ---
+
+// GET /api/admin/subjects
+router.get('/subjects', async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('subjects').select('*').order('name');
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch subjects' });
+    }
+});
+
+// GET /api/admin/topics
+router.get('/topics', async (req, res) => {
+    try {
+        const { subjectId } = req.query;
+        let query = supabase.from('topics').select('*').order('name');
+        if (subjectId) query = query.eq('subject_id', subjectId);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch topics' });
+    }
+});
+
+// GET /api/admin/languages
+router.get('/languages', async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('languages').select('*').eq('is_active', true);
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch languages' });
+    }
+});
+
+
+// --- USERS ---
+
+// GET /api/admin/users
+router.get('/users', async (req, res) => {
+    try {
+        const { page = 1, limit = 10, search } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('users')
+            .select('*', { count: 'exact' })
+            .range(offset, offset + Number(limit) - 1)
+            .order('created_at', { ascending: false });
+
+        if (search) {
+            query = query.or(`email.ilike.%${search}%,full_name.ilike.%${search}%`);
+        }
+
+        const { data, count, error } = await query;
+        console.log('Admin Users Query Result:', { count, dataLength: data?.length, error });
+
+        if (error) throw error;
+        res.json({ users: data, total: count });
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
+// --- ANALYTICS ---
+
+// GET /api/admin/analytics/overview
+router.get('/analytics/overview', async (req, res) => {
+    try {
+        // 1. Total Users
+        const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
+
+        // 2. Total Questions
+        const { count: totalQuestions } = await supabase.from('questions').select('*', { count: 'exact', head: true });
+
+        // 3. Total Tests Taken
+        const { count: totalTests } = await supabase.from('test_attempts').select('*', { count: 'exact', head: true });
+
+        // 4. Active Today (Users active in last 24h based on user_stats or test_attempts)
+        // Using user_stats.last_activity if available, else fallback to 0
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { count: activeUsers } = await supabase
+            .from('user_stats')
+            .select('*', { count: 'exact', head: true })
+            .gt('last_activity', twentyFourHoursAgo);
+
+        res.json({
+            total_users: totalUsers || 0,
+            total_questions: totalQuestions || 0,
+            total_tests: totalTests || 0,
+            active_today: activeUsers || 0
+        });
+    } catch (error) {
+        console.error('Error fetching analytics overview:', error);
+        res.status(500).json({ error: 'Failed to fetch analytics' });
+    }
+});
+
+// GET /api/admin/analytics/activity
+// Returns daily test count associated for last 30 days
+router.get('/analytics/activity', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // We can't group by easily with Supabase client alone without RPC.
+        // For MVP, we'll fetch ID and created_at and aggregate in JS.
+        // Not scalable for huge data, but fine for MVP/Admin dashboard.
+
+        const { data, error } = await supabase
+            .from('test_attempts')
+            .select('started_at')
+            .gt('started_at', thirtyDaysAgo);
+
+        if (error) throw error;
+
+        // Aggregate
+        const activityMap: Record<string, number> = {};
+        data.forEach((attempt: any) => {
+            const date = new Date(attempt.started_at).toISOString().split('T')[0];
+            activityMap[date] = (activityMap[date] || 0) + 1;
+        });
+
+        // Fill missing days
+        const chartData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            chartData.push({
+                date: dateStr,
+                count: activityMap[dateStr] || 0
+            });
+        }
+
+        res.json(chartData);
+    } catch (error) {
+        console.error('Error fetching activity:', error);
+        res.status(500).json({ error: 'Failed to fetch activity' });
+    }
+});
+
+// --- TEST CATEGORIES ---
+
+// GET /api/admin/test-categories
+router.get('/test-categories', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('test_categories')
+            .select('*')
+            .order('display_order');
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching test categories:', error);
+        res.status(500).json({ error: 'Failed to fetch test categories' });
+    }
+});
+
+// POST /api/admin/test-categories
+router.post('/test-categories', async (req, res) => {
+    try {
+        const { name, slug, description, icon, color, display_order } = req.body;
+        const { data, error } = await supabase
+            .from('test_categories')
+            .insert({ name, slug, description, icon, color, display_order })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating test category:', error);
+        res.status(500).json({ error: 'Failed to create test category' });
+    }
+});
+
+// PUT /api/admin/test-categories/:id
+router.put('/test-categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, slug, description, icon, color, display_order, is_active } = req.body;
+        const { error } = await supabase
+            .from('test_categories')
+            .update({ name, slug, description, icon, color, display_order, is_active })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating test category:', error);
+        res.status(500).json({ error: 'Failed to update test category' });
+    }
+});
+
+// DELETE /api/admin/test-categories/:id
+router.delete('/test-categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('test_categories')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting test category:', error);
+        res.status(500).json({ error: 'Failed to delete test category' });
+    }
+});
+
+// --- TESTS ---
+
+// GET /api/admin/tests
+router.get('/tests', async (req, res) => {
+    try {
+        const { categoryId, examId } = req.query;
+        let query = supabase
+            .from('tests')
+            .select(`
+                *,
+                test_category:test_categories(id, name, slug),
+                exam:exams(id, name),
+                test_questions(count)
+            `)
+            .order('created_at', { ascending: false });
+
+        if (categoryId) {
+            query = query.eq('test_category_id', categoryId);
+        }
+        if (examId) {
+            query = query.eq('exam_id', examId);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+
+        // Transform to include question count
+        const tests = data.map((test: any) => ({
+            ...test,
+            question_count: test.test_questions?.[0]?.count || 0
+        }));
+
+        res.json(tests);
+    } catch (error) {
+        console.error('Error fetching tests:', error);
+        res.status(500).json({ error: 'Failed to fetch tests' });
+    }
+});
+
+// GET /api/admin/tests/:id
+router.get('/tests/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data, error } = await supabase
+            .from('tests')
+            .select(`
+                *,
+                test_category:test_categories(id, name),
+                exam:exams(id, name),
+                test_questions(
+                    id,
+                    order_index,
+                    question:questions(
+                        id,
+                        difficulty,
+                        translations:question_translations(question_text, language:languages(code))
+                    )
+                )
+            `)
+            .eq('id', id)
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching test:', error);
+        res.status(500).json({ error: 'Failed to fetch test' });
+    }
+});
+
+// POST /api/admin/tests
+router.post('/tests', async (req, res) => {
+    try {
+        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active } = req.body;
+        const { data, error } = await supabase
+            .from('tests')
+            .insert({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating test:', error);
+        res.status(500).json({ error: 'Failed to create test' });
+    }
+});
+
+// PUT /api/admin/tests/:id
+router.put('/tests/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active } = req.body;
+        const { error } = await supabase
+            .from('tests')
+            .update({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating test:', error);
+        res.status(500).json({ error: 'Failed to update test' });
+    }
+});
+
+// DELETE /api/admin/tests/:id
+router.delete('/tests/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('tests')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting test:', error);
+        res.status(500).json({ error: 'Failed to delete test' });
+    }
+});
+
+// POST /api/admin/tests/:id/questions - Add questions to test
+router.post('/tests/:id/questions', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { question_ids } = req.body; // Array of question IDs
+
+        // Get current max order_index
+        const { data: existing } = await supabase
+            .from('test_questions')
+            .select('order_index')
+            .eq('test_id', id)
+            .order('order_index', { ascending: false })
+            .limit(1);
+
+        let startIndex = (existing?.[0]?.order_index || 0) + 1;
+
+        const inserts = question_ids.map((qId: string, idx: number) => ({
+            test_id: id,
+            question_id: qId,
+            order_index: startIndex + idx
+        }));
+
+        const { data, error } = await supabase
+            .from('test_questions')
+            .insert(inserts)
+            .select();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error adding questions to test:', error);
+        res.status(500).json({ error: 'Failed to add questions' });
+    }
+});
+
+// DELETE /api/admin/tests/:id/questions/:questionId - Remove question from test
+router.delete('/tests/:testId/questions/:linkId', async (req, res) => {
+    try {
+        const { linkId } = req.params;
+        const { error } = await supabase
+            .from('test_questions')
+            .delete()
+            .eq('id', linkId);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error removing question from test:', error);
+        res.status(500).json({ error: 'Failed to remove question' });
+    }
+});
+
+// Seed Data Endpoint
+router.post('/seed', async (req, res) => {
+    try {
+        const { SEED_DATA } = await import('../constants/seedData.js');
+
+        // 1. Exam Categories
+        for (const cat of SEED_DATA.examCategories) {
+            const { data: existing } = await supabase.from('exam_categories').select('id').eq('name', cat.name).single();
+            if (!existing) {
+                await supabase.from('exam_categories').insert(cat);
+            }
+        }
+
+        // 2. Exams
+        for (const exam of SEED_DATA.exams) {
+            // Find category id
+            const { data: cat } = await supabase.from('exam_categories').select('id').eq('name', exam.category_name).single();
+            if (cat) {
+                const { data: existing } = await supabase.from('exams').select('id').eq('name', exam.name).single();
+                if (!existing) {
+                    const { category_name, ...examData } = exam;
+                    await supabase.from('exams').insert({ ...examData, category_id: cat.id });
+                }
+            }
+        }
+
+        // 3. Subjects
+        for (const sub of SEED_DATA.subjects) {
+            const { data: existing } = await supabase.from('subjects').select('id').eq('name', sub.name).single();
+            if (!existing) {
+                await supabase.from('subjects').insert(sub);
+            }
+        }
+
+        res.json({ message: 'Database seeded successfully' });
+    } catch (error) {
+        console.error('Seed error:', error);
+        res.status(500).json({ error: 'Failed to seed database' });
+    }
+});
+
+export default router;
