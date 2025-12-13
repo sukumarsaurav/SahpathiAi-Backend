@@ -34,7 +34,7 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(helmet());
 app.use(cors({
-    origin: process.env.CLIENT_URL || (process.env.NODE_ENV === 'production' ? 'https://sahpathi.ai' : 'http://localhost:5173'),
+    origin: process.env.CLIENT_URL || (process.env.NODE_ENV === 'production' ? 'https://sahpathi-ai.vercel.app' : 'http://localhost:5173'),
     credentials: true
 }));
 app.use(express.json());
