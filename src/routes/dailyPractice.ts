@@ -76,11 +76,23 @@ router.get('/stats', authenticate, async (req, res) => {
         const userId = req.user!.id;
 
         // Get topics user hasn't attempted (new topics)
+        // Get user's test attempts to filter answers
+        const { data: attempts } = await supabaseAdmin
+            .from('test_attempts')
+            .select('id')
+            .eq('user_id', userId);
+        const attemptIds = attempts?.map(a => a.id) || [];
+
         const { data: allTopics } = await supabaseAdmin.from('topics').select('id');
-        const { data: attemptedTopics } = await supabaseAdmin
-            .from('user_answers')
-            .select('question:questions(topic_id)')
-            .eq('attempt_id', supabase.from('test_attempts').select('id').eq('user_id', userId));
+
+        let attemptedTopics: any[] = [];
+        if (attemptIds.length > 0) {
+            const { data } = await supabaseAdmin
+                .from('user_answers')
+                .select('question:questions(topic_id)')
+                .in('attempt_id', attemptIds);
+            attemptedTopics = data || [];
+        }
 
         const attemptedTopicIds = new Set(attemptedTopics?.map(a => (a.question as any)?.topic_id));
         const newTopicIds = allTopics?.filter(t => !attemptedTopicIds.has(t.id)).map(t => t.id) || [];
@@ -107,11 +119,17 @@ router.get('/stats', authenticate, async (req, res) => {
 
         // Count time-consuming (questions where user took >2x average)
         // Simplified for now
-        const { count: timeConsumingCount } = await supabaseAdmin
-            .from('user_answers')
-            .select('*', { count: 'exact', head: true })
-            .eq('attempt_id', supabase.from('test_attempts').select('id').eq('user_id', userId))
-            .gt('time_taken_seconds', 60);
+        // Count time-consuming (questions where user took >2x average)
+        // Simplified for now
+        let timeConsumingCount = 0;
+        if (attemptIds.length > 0) {
+            const { count } = await supabaseAdmin
+                .from('user_answers')
+                .select('*', { count: 'exact', head: true })
+                .in('attempt_id', attemptIds)
+                .gt('time_taken_seconds', 60);
+            timeConsumingCount = count || 0;
+        }
 
         res.json({
             new_topics: newTopicsCount || 0,
