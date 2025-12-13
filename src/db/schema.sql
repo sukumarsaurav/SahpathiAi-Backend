@@ -565,8 +565,19 @@ CREATE POLICY subscription_plans_read ON subscription_plans FOR SELECT USING (is
 CREATE POLICY resources_read ON resources FOR SELECT USING (true);
 
 -- Admin access policies for content management
+-- Helper function to avoid RLS recursion
+CREATE OR REPLACE FUNCTION get_my_role()
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT role FROM users WHERE id = auth.uid();
+$$;
+
 CREATE POLICY admin_all_policy ON users FOR ALL USING (
-  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+  get_my_role() IN ('admin', 'content_manager')
 );
 
 CREATE POLICY admin_exams_all ON exams FOR ALL USING (

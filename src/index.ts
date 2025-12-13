@@ -37,10 +37,16 @@ app.use(cors({
     origin: [
         'https://sahpathi-ai.vercel.app',
         'https://sahpathi.ai',
+        'http://localhost:5173',
         process.env.CLIENT_URL
-    ].filter((origin): origin is string => !!origin),
-    credentials: true
+    ].filter((origin): origin is string => !!origin && origin !== 'undefined'),
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 // Health check
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -49,9 +55,7 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/languages', languageRoutes);
-// app.use('/api/languages', languageRoutes); // Removing duplicate if present, based on file view it WAS duplicated in line 51 too? 
-// Wait, in step 12 line 51 was ALREADY `app.use('/api/languages', languageRoutes);` duplicated!
-// I will clean that up too.
+
 
 app.use('/api/exams', examRoutes);
 app.use('/api/subjects', subjectRoutes);
