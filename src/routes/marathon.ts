@@ -137,6 +137,7 @@ router.get('/next-question', authenticate, async (req, res) => {
             .eq('session_id', session_id)
             .eq('is_mastered', false)
             .order('priority')
+            .order('last_shown_at', { ascending: true, nullsFirst: true })
             .limit(1)
             .single();
 
