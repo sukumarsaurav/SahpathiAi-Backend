@@ -104,15 +104,44 @@ router.get('/:examId/subjects', async (req, res) => {
                     .eq('subject_id', item.id)
                     .eq('is_active', true);
 
-                // Count exam-wide tests (null subject_id, matching exam_id)
-                const { count: examWideCount } = await supabaseAdmin
-                    .from('tests')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('exam_id', examId)
-                    .is('subject_id', null)
-                    .eq('is_active', true);
+                let topicBasedCount = 0;
 
-                const totalCount = (directCount || 0) + (examWideCount || 0);
+                // Count topic-based tests (tests whose questions belong to topics of this subject)
+                // This replaces the old "exam-wide" count with a more accurate topic-based count
+                // Get topics for this master subject (shared or exam-specific)
+                const { data: topics } = await supabaseAdmin
+                    .from('topics')
+                    .select('id')
+                    .eq('subject_id', item.subject_id) // Master subject ID
+                    .or(`exam_id.is.null,exam_id.eq.${examId}`);
+
+                const topicIds = topics?.map(t => t.id) || [];
+
+                if (topicIds.length > 0) {
+                    // Get unique test IDs that have questions from these topics
+                    const { data: testQuestions } = await supabaseAdmin
+                        .from('test_questions')
+                        .select('test_id, question:questions!inner(topic_id)')
+                        .in('question.topic_id', topicIds);
+
+                    if (testQuestions && testQuestions.length > 0) {
+                        // Get unique test IDs
+                        const uniqueTestIds = [...new Set(testQuestions.map(tq => tq.test_id))];
+
+                        // Count active tests that aren't already counted as direct subject tests
+                        // (subject_id is null means they're topic-wise, not subject-specific)
+                        const { count } = await supabaseAdmin
+                            .from('tests')
+                            .select('*', { count: 'exact', head: true })
+                            .in('id', uniqueTestIds)
+                            .is('subject_id', null)
+                            .eq('is_active', true);
+
+                        topicBasedCount = count || 0;
+                    }
+                }
+
+                const totalCount = (directCount || 0) + topicBasedCount;
 
                 return {
                     ...item,
