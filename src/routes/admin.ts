@@ -1520,10 +1520,10 @@ router.get('/tests/:id', async (req, res) => {
 // POST /api/admin/tests
 router.post('/tests', async (req, res) => {
     try {
-        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active } = req.body;
+        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active, subject_id } = req.body;
         const { data, error } = await supabase
             .from('tests')
-            .insert({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active })
+            .insert({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active, subject_id: subject_id || null })
             .select()
             .single();
 
@@ -1539,10 +1539,10 @@ router.post('/tests', async (req, res) => {
 router.put('/tests/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active } = req.body;
+        const { title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active, subject_id } = req.body;
         const { error } = await supabase
             .from('tests')
-            .update({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active })
+            .update({ title, description, exam_id, test_category_id, duration_minutes, difficulty, is_active, subject_id: subject_id || null })
             .eq('id', id);
 
         if (error) throw error;
