@@ -7,9 +7,12 @@ const router = Router();
 /**
  * GET /api/tests/categories
  * Get test categories with counts
+ * Query params: examId (optional) - filter test count by exam
  */
 router.get('/categories', optionalAuth, async (req, res) => {
     try {
+        const { examId } = req.query;
+
         // Fetch categories from DB
         const { data: categories, error } = await supabaseAdmin
             .from('test_categories')
@@ -19,14 +22,21 @@ router.get('/categories', optionalAuth, async (req, res) => {
 
         if (error) throw error;
 
-        // Get counts for each category
+        // Get counts for each category (filtered by exam if provided)
         const categoriesWithCounts = await Promise.all(
             categories.map(async (cat) => {
-                const { count } = await supabaseAdmin
+                let query = supabaseAdmin
                     .from('tests')
                     .select('*', { count: 'exact', head: true })
-                    .eq('test_category_id', cat.id) // Use new column
+                    .eq('test_category_id', cat.id)
                     .eq('is_active', true);
+
+                // Apply exam filter if provided
+                if (examId && typeof examId === 'string') {
+                    query = query.eq('exam_id', examId);
+                }
+
+                const { count } = await query;
 
                 return { ...cat, testCount: count || 0 };
             })
