@@ -54,7 +54,7 @@ router.post('/signup', async (req, res) => {
         await supabaseAdmin.from('referral_codes').insert({
             user_id: authData.user.id,
             code,
-            referral_link: `https://sahpathi.ai/ref/${code}`
+            referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
         });
 
         // Apply referral code if provided - use admin client
@@ -141,7 +141,7 @@ router.post('/login', async (req, res) => {
                     await supabaseAdmin.from('referral_codes').insert({
                         user_id: data.user.id,
                         code,
-                        referral_link: `https://sahpathi.ai/ref/${code}`
+                        referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
                     });
                 } catch (e) { console.log('Referral code may already exist'); }
             }
@@ -228,7 +228,7 @@ router.get('/me', async (req, res) => {
                 await supabaseAdmin.from('referral_codes').insert({
                     user_id: user.id,
                     code,
-                    referral_link: `https://sahpathi.ai/ref/${code}`
+                    referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
                 });
             } catch (e) { console.log('Referral code may already exist'); }
         }

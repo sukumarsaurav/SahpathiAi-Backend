@@ -32,7 +32,7 @@ async function generateUniqueReferralCode(userId: string, userName?: string): Pr
                 .insert({
                     user_id: userId,
                     code,
-                    referral_link: `https://sahpathi.ai/ref/${code}`
+                    referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
                 });
 
             if (!error) {
@@ -47,7 +47,7 @@ async function generateUniqueReferralCode(userId: string, userName?: string): Pr
     await supabaseAdmin.from('referral_codes').insert({
         user_id: userId,
         code: fallbackCode,
-        referral_link: `https://sahpathi.ai/ref/${fallbackCode}`
+        referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${fallbackCode}`
     });
     return fallbackCode;
 }
@@ -78,7 +78,7 @@ router.get('/', authenticate, async (req, res) => {
             const code = await generateUniqueReferralCode(req.user!.id, userData?.full_name);
             codeData = {
                 code,
-                referral_link: `https://sahpathi.ai/ref/${code}`
+                referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
             };
         }
 
