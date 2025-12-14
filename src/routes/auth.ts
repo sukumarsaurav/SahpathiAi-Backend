@@ -132,6 +132,18 @@ router.post('/login', async (req, res) => {
                 try { await supabaseAdmin.from('user_stats').insert({ user_id: data.user.id }); } catch (e) { }
                 try { await supabaseAdmin.from('user_preferences').insert({ user_id: data.user.id }); } catch (e) { }
                 try { await supabaseAdmin.from('wallets').insert({ user_id: data.user.id, balance: 0 }); } catch (e) { }
+
+                // Generate unique referral code for new user
+                try {
+                    const prefix = (profile?.full_name?.substring(0, 3) || 'SAH').toUpperCase().replace(/[^A-Z]/g, 'X');
+                    const randomPart = Math.random().toString(36).substring(2, 7).toUpperCase();
+                    const code = `${prefix}${randomPart}`;
+                    await supabaseAdmin.from('referral_codes').insert({
+                        user_id: data.user.id,
+                        code,
+                        referral_link: `https://sahpathi.ai/ref/${code}`
+                    });
+                } catch (e) { console.log('Referral code may already exist'); }
             }
         }
 
@@ -207,6 +219,18 @@ router.get('/me', async (req, res) => {
             try { await supabaseAdmin.from('user_stats').insert({ user_id: user.id }); } catch (e) { }
             try { await supabaseAdmin.from('user_preferences').insert({ user_id: user.id }); } catch (e) { }
             try { await supabaseAdmin.from('wallets').insert({ user_id: user.id, balance: 0 }); } catch (e) { }
+
+            // Generate unique referral code for new user
+            try {
+                const prefix = (profile?.full_name?.substring(0, 3) || 'SAH').toUpperCase().replace(/[^A-Z]/g, 'X');
+                const randomPart = Math.random().toString(36).substring(2, 7).toUpperCase();
+                const code = `${prefix}${randomPart}`;
+                await supabaseAdmin.from('referral_codes').insert({
+                    user_id: user.id,
+                    code,
+                    referral_link: `https://sahpathi.ai/ref/${code}`
+                });
+            } catch (e) { console.log('Referral code may already exist'); }
         }
 
         res.json(profile);

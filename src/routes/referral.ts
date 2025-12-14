@@ -5,17 +5,82 @@ import { authenticate } from '../middleware/auth';
 const router = Router();
 
 /**
+ * Generate a unique referral code
+ * Format: PREFIX + Random alphanumeric (8 chars total)
+ * Uses retry logic to ensure uniqueness
+ */
+async function generateUniqueReferralCode(userId: string, userName?: string): Promise<string> {
+    const maxRetries = 5;
+
+    for (let i = 0; i < maxRetries; i++) {
+        // Generate code: First 3 chars of name (or SAH) + 5 random alphanumeric
+        const prefix = (userName?.substring(0, 3) || 'SAH').toUpperCase().replace(/[^A-Z]/g, 'X');
+        const randomPart = Math.random().toString(36).substring(2, 7).toUpperCase();
+        const code = `${prefix}${randomPart}`;
+
+        // Check if code already exists
+        const { data: existing } = await supabaseAdmin
+            .from('referral_codes')
+            .select('id')
+            .eq('code', code)
+            .single();
+
+        if (!existing) {
+            // Code is unique, insert and return
+            const { error } = await supabaseAdmin
+                .from('referral_codes')
+                .insert({
+                    user_id: userId,
+                    code,
+                    referral_link: `https://sahpathi.ai/ref/${code}`
+                });
+
+            if (!error) {
+                return code;
+            }
+            // If insert failed (race condition), retry
+        }
+    }
+
+    // Fallback: use UUID-based code which is guaranteed unique
+    const fallbackCode = `REF${Date.now().toString(36).toUpperCase()}`;
+    await supabaseAdmin.from('referral_codes').insert({
+        user_id: userId,
+        code: fallbackCode,
+        referral_link: `https://sahpathi.ai/ref/${fallbackCode}`
+    });
+    return fallbackCode;
+}
+
+/**
  * GET /api/referral
  * Get user's referral code and stats
+ * Auto-generates referral code if missing (for OAuth users)
  */
 router.get('/', authenticate, async (req, res) => {
     try {
         // Get referral code
-        const { data: codeData } = await supabaseAdmin
+        let { data: codeData } = await supabaseAdmin
             .from('referral_codes')
             .select('*')
             .eq('user_id', req.user!.id)
             .single();
+
+        // If no referral code exists, generate one (covers OAuth signups)
+        if (!codeData) {
+            // Fetch user's name for the referral code prefix
+            const { data: userData } = await supabaseAdmin
+                .from('users')
+                .select('full_name')
+                .eq('id', req.user!.id)
+                .single();
+
+            const code = await generateUniqueReferralCode(req.user!.id, userData?.full_name);
+            codeData = {
+                code,
+                referral_link: `https://sahpathi.ai/ref/${code}`
+            };
+        }
 
         // Get referral stats
         const { data: referrals } = await supabaseAdmin
