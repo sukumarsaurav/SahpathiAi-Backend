@@ -1071,6 +1071,311 @@ router.get('/analytics/activity', async (req, res) => {
     }
 });
 
+// GET /api/admin/analytics/registration-stats
+// Returns user registration statistics by method and time intervals
+router.get('/analytics/registration-stats', async (req, res) => {
+    try {
+        // Get total users
+        const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
+
+        // Get users registered in last 7 days
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count: usersLast7Days } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', sevenDaysAgo);
+
+        // Get users registered in last 30 days
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { count: usersLast30Days } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', thirtyDaysAgo);
+
+        // Get registration trend (daily for last 30 days)
+        const { data: users } = await supabase
+            .from('users')
+            .select('created_at')
+            .gt('created_at', thirtyDaysAgo);
+
+        const registrationTrend: Record<string, number> = {};
+        (users || []).forEach((user: any) => {
+            const date = new Date(user.created_at).toISOString().split('T')[0];
+            registrationTrend[date] = (registrationTrend[date] || 0) + 1;
+        });
+
+        // Fill missing days
+        const chartData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            chartData.push({
+                date: dateStr,
+                count: registrationTrend[dateStr] || 0
+            });
+        }
+
+        res.json({
+            total_users: totalUsers || 0,
+            users_last_7_days: usersLast7Days || 0,
+            users_last_30_days: usersLast30Days || 0,
+            registration_trend: chartData
+        });
+    } catch (error) {
+        console.error('Error fetching registration stats:', error);
+        res.status(500).json({ error: 'Failed to fetch registration stats' });
+    }
+});
+
+// GET /api/admin/analytics/referral-stats
+// Returns referral statistics
+router.get('/analytics/referral-stats', async (req, res) => {
+    try {
+        // Total referral codes generated
+        const { count: totalCodes } = await supabase
+            .from('referral_codes')
+            .select('*', { count: 'exact', head: true });
+
+        // Total successful referrals
+        const { count: totalReferrals } = await supabase
+            .from('referrals')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'completed');
+
+        // Pending referrals
+        const { count: pendingReferrals } = await supabase
+            .from('referrals')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+
+        // Top referrers (users who referred the most)
+        const { data: topReferrers } = await supabase
+            .from('referrals')
+            .select(`
+                referrer_id,
+                users!referrals_referrer_id_fkey(email, full_name)
+            `)
+            .eq('status', 'completed');
+
+        // Count referrals per referrer
+        const referrerCounts: Record<string, { count: number; email: string; name: string }> = {};
+        (topReferrers || []).forEach((r: any) => {
+            if (r.referrer_id) {
+                if (!referrerCounts[r.referrer_id]) {
+                    referrerCounts[r.referrer_id] = {
+                        count: 0,
+                        email: r.users?.email || 'Unknown',
+                        name: r.users?.full_name || 'Unknown'
+                    };
+                }
+                referrerCounts[r.referrer_id].count++;
+            }
+        });
+
+        const topReferrersList = Object.entries(referrerCounts)
+            .map(([id, data]) => ({ id, ...data }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        // Referral trend (last 30 days)
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: recentReferrals } = await supabase
+            .from('referrals')
+            .select('created_at')
+            .gt('created_at', thirtyDaysAgo);
+
+        const referralTrend: Record<string, number> = {};
+        (recentReferrals || []).forEach((r: any) => {
+            const date = new Date(r.created_at).toISOString().split('T')[0];
+            referralTrend[date] = (referralTrend[date] || 0) + 1;
+        });
+
+        const chartData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            chartData.push({
+                date: dateStr,
+                count: referralTrend[dateStr] || 0
+            });
+        }
+
+        res.json({
+            total_codes: totalCodes || 0,
+            total_referrals: totalReferrals || 0,
+            pending_referrals: pendingReferrals || 0,
+            conversion_rate: totalCodes ? Math.round(((totalReferrals || 0) / totalCodes) * 100) : 0,
+            top_referrers: topReferrersList,
+            referral_trend: chartData
+        });
+    } catch (error) {
+        console.error('Error fetching referral stats:', error);
+        res.status(500).json({ error: 'Failed to fetch referral stats' });
+    }
+});
+
+// GET /api/admin/analytics/subscription-stats
+// Returns subscription and revenue statistics
+router.get('/analytics/subscription-stats', async (req, res) => {
+    try {
+        // Get all subscription plans
+        const { data: plans } = await supabase
+            .from('subscription_plans')
+            .select('id, name, price_monthly, price_yearly')
+            .eq('is_active', true);
+
+        const planMap: Record<string, { name: string; price_monthly: number; price_yearly: number }> = {};
+        (plans || []).forEach((p: any) => {
+            planMap[p.id] = { name: p.name, price_monthly: p.price_monthly, price_yearly: p.price_yearly };
+        });
+
+        // Get active user subscriptions with plan details
+        const { data: subscriptions } = await supabase
+            .from('user_subscriptions')
+            .select('plan_id, status')
+            .eq('status', 'active');
+
+        // Count users by plan
+        const planCounts: Record<string, number> = {};
+        (subscriptions || []).forEach((sub: any) => {
+            const planName = planMap[sub.plan_id]?.name || 'Unknown';
+            planCounts[planName] = (planCounts[planName] || 0) + 1;
+        });
+
+        // Calculate total paid subscribers
+        const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
+        const activeSubscribers = subscriptions?.length || 0;
+        const freeUsers = (totalUsers || 0) - activeSubscribers;
+
+        // Get paid payment orders
+        const { data: paidOrders } = await supabase
+            .from('payment_orders')
+            .select('amount, paid_at, billing_cycle')
+            .eq('status', 'paid');
+
+        // Calculate total income
+        const totalIncome = (paidOrders || []).reduce((sum: number, order: any) => sum + parseFloat(order.amount || 0), 0);
+
+        // Income trend (last 30 days)
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: recentPayments } = await supabase
+            .from('payment_orders')
+            .select('amount, paid_at')
+            .eq('status', 'paid')
+            .gt('paid_at', thirtyDaysAgo);
+
+        const incomeTrend: Record<string, number> = {};
+        (recentPayments || []).forEach((p: any) => {
+            if (p.paid_at) {
+                const date = new Date(p.paid_at).toISOString().split('T')[0];
+                incomeTrend[date] = (incomeTrend[date] || 0) + parseFloat(p.amount || 0);
+            }
+        });
+
+        const chartData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            chartData.push({
+                date: dateStr,
+                amount: incomeTrend[dateStr] || 0
+            });
+        }
+
+        // Monthly recurring revenue estimation (last 30 days income)
+        const last30DaysIncome = Object.values(incomeTrend).reduce((sum, val) => sum + val, 0);
+
+        res.json({
+            total_users: totalUsers || 0,
+            free_users: freeUsers,
+            paid_users: activeSubscribers,
+            plan_distribution: planCounts,
+            total_income: totalIncome,
+            monthly_revenue: last30DaysIncome,
+            income_trend: chartData
+        });
+    } catch (error) {
+        console.error('Error fetching subscription stats:', error);
+        res.status(500).json({ error: 'Failed to fetch subscription stats' });
+    }
+});
+
+// GET /api/admin/analytics/content-stats
+// Returns content statistics (questions, subjects, topics)
+router.get('/analytics/content-stats', async (req, res) => {
+    try {
+        // Total questions by difficulty
+        const { data: questions } = await supabase
+            .from('questions')
+            .select('difficulty');
+
+        const difficultyCount: Record<string, number> = { easy: 0, medium: 0, hard: 0 };
+        (questions || []).forEach((q: any) => {
+            difficultyCount[q.difficulty] = (difficultyCount[q.difficulty] || 0) + 1;
+        });
+
+        // Total subjects
+        const { count: totalSubjects } = await supabase
+            .from('subjects')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_active', true);
+
+        // Total topics
+        const { count: totalTopics } = await supabase
+            .from('topics')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_active', true);
+
+        // Total exams
+        const { count: totalExams } = await supabase
+            .from('exams')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_active', true);
+
+        // Total resources
+        const { count: totalResources } = await supabase
+            .from('resources')
+            .select('*', { count: 'exact', head: true });
+
+        // Questions per subject (top 10)
+        const { data: subjectQuestions } = await supabase
+            .from('topics')
+            .select(`
+                subject_id,
+                subjects(name),
+                question_count
+            `);
+
+        const subjectCounts: Record<string, { name: string; count: number }> = {};
+        (subjectQuestions || []).forEach((t: any) => {
+            if (t.subject_id && t.subjects) {
+                if (!subjectCounts[t.subject_id]) {
+                    subjectCounts[t.subject_id] = { name: t.subjects.name, count: 0 };
+                }
+                subjectCounts[t.subject_id].count += t.question_count || 0;
+            }
+        });
+
+        const topSubjects = Object.entries(subjectCounts)
+            .map(([id, data]) => ({ id, ...data }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        res.json({
+            total_questions: questions?.length || 0,
+            questions_by_difficulty: difficultyCount,
+            total_subjects: totalSubjects || 0,
+            total_topics: totalTopics || 0,
+            total_exams: totalExams || 0,
+            total_resources: totalResources || 0,
+            questions_per_subject: topSubjects
+        });
+    } catch (error) {
+        console.error('Error fetching content stats:', error);
+        res.status(500).json({ error: 'Failed to fetch content stats' });
+    }
+});
+
 // --- TEST CATEGORIES ---
 
 // GET /api/admin/test-categories
