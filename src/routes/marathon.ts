@@ -45,7 +45,10 @@ router.post('/start', authenticate, async (req, res) => {
             examSubjectId = examSubject?.id || null;
         }
 
-        // Create session
+        // Shuffle questions array for random order
+        const shuffledQuestions = [...questions].sort(() => Math.random() - 0.5);
+
+        // Create session with last_question_id field for tracking consecutive repeats
         const { data: session, error } = await supabaseAdmin
             .from('marathon_sessions')
             .insert({
@@ -57,7 +60,8 @@ router.post('/start', authenticate, async (req, res) => {
                 questions_answered: 0,
                 correct_answers: 0,
                 questions_mastered: 0,
-                started_at: new Date().toISOString()
+                started_at: new Date().toISOString(),
+                last_question_id: null // Will be set after first question is shown
             })
             .select()
             .single();
@@ -67,15 +71,17 @@ router.post('/start', authenticate, async (req, res) => {
             throw error;
         }
 
-        // Create question queue with initial priorities
-        const queueItems = questions.map((q, index) => ({
+        // Create question queue with randomized priorities
+        // Use shuffled order index for initial priority, ensuring random starting point
+        const queueItems = shuffledQuestions.map((q, index) => ({
             session_id: session.id,
             question_id: q.id,
-            priority: index,
+            priority: index, // Shuffled order means random priority
             times_shown: 0,
             times_correct: 0,
             times_wrong: 0,
-            is_mastered: false
+            is_mastered: false,
+            next_show_at: null // No delay initially
         }));
 
         const { error: queueError } = await supabaseAdmin.from('marathon_question_queue').insert(queueItems);
@@ -118,33 +124,104 @@ router.get('/session/:sessionId', authenticate, async (req, res) => {
 
 /**
  * GET /api/marathon/next-question
- * Get next question using spaced repetition
+ * Get next question with random selection, no consecutive repeats, and delayed retry for wrong answers
  */
 router.get('/next-question', authenticate, async (req, res) => {
     try {
         const { session_id } = req.query;
 
-        // Get question with lowest priority that isn't mastered
-        const { data: queueItem, error } = await supabaseAdmin
-            .from('marathon_question_queue')
-            .select(`
-        *,
-        question:questions(
-          *,
-          translations:question_translations(*, language:languages(*))
-        )
-      `)
-            .eq('session_id', session_id)
-            .eq('is_mastered', false)
-            .order('priority')
-            .order('last_shown_at', { ascending: true, nullsFirst: true })
-            .limit(1)
+        // Get session to check last_question_id for preventing consecutive repeats
+        const { data: session } = await supabaseAdmin
+            .from('marathon_sessions')
+            .select('last_question_id')
+            .eq('id', session_id)
             .single();
 
-        if (error || !queueItem) {
-            // All questions mastered
+        const lastQuestionId = session?.last_question_id;
+        const now = new Date().toISOString();
+
+        // Build query for eligible questions:
+        // - Not mastered
+        // - Not shown consecutively (exclude last_question_id)
+        // - next_show_at is null or in the past (respect delay for wrong answers)
+        let query = supabaseAdmin
+            .from('marathon_question_queue')
+            .select(`
+                *,
+                question:questions(
+                    *,
+                    translations:question_translations(*, language:languages(*))
+                )
+            `)
+            .eq('session_id', session_id)
+            .eq('is_mastered', false)
+            .or(`next_show_at.is.null,next_show_at.lte.${now}`);
+
+        // Exclude last shown question to prevent consecutive repeats
+        if (lastQuestionId) {
+            query = query.neq('question_id', lastQuestionId);
+        }
+
+        // Get multiple eligible questions and randomly select one
+        const { data: eligibleQuestions, error } = await query
+            .order('priority')
+            .limit(10); // Get top 10 by priority for random selection
+
+        // If no questions available (excluding last one), check if only last question remains
+        if (!eligibleQuestions || eligibleQuestions.length === 0) {
+            // Check if there's only the last question remaining (and it's not mastered)
+            if (lastQuestionId) {
+                const { data: lastQuestion } = await supabaseAdmin
+                    .from('marathon_question_queue')
+                    .select(`
+                        *,
+                        question:questions(
+                            *,
+                            translations:question_translations(*, language:languages(*))
+                        )
+                    `)
+                    .eq('session_id', session_id)
+                    .eq('question_id', lastQuestionId)
+                    .eq('is_mastered', false)
+                    .or(`next_show_at.is.null,next_show_at.lte.${now}`)
+                    .single();
+
+                if (lastQuestion) {
+                    // Only one question left, show it even if it was shown last
+                    const q = lastQuestion.question as any;
+                    const languageId = req.user?.preferred_language_id;
+                    const translation = languageId
+                        ? q.translations.find((t: any) => t.language_id === languageId)
+                        : q.translations[0];
+
+                    // Update times shown and last_shown_at
+                    await supabaseAdmin
+                        .from('marathon_question_queue')
+                        .update({
+                            times_shown: lastQuestion.times_shown + 1,
+                            last_shown_at: new Date().toISOString()
+                        })
+                        .eq('id', lastQuestion.id);
+
+                    return res.json({
+                        queue_id: lastQuestion.id,
+                        question_id: q.id,
+                        question: translation?.question_text,
+                        options: translation?.options,
+                        difficulty: q.difficulty,
+                        times_shown: lastQuestion.times_shown + 1,
+                        translations: q.translations
+                    });
+                }
+            }
+
+            // All questions mastered - marathon complete!
             return res.json({ completed: true });
         }
+
+        // Randomly select from eligible questions (weighted towards lower priority)
+        const randomIndex = Math.floor(Math.random() * eligibleQuestions.length);
+        const queueItem = eligibleQuestions[randomIndex];
 
         const q = queueItem.question as any;
         const languageId = req.user?.preferred_language_id;
@@ -152,7 +229,7 @@ router.get('/next-question', authenticate, async (req, res) => {
             ? q.translations.find((t: any) => t.language_id === languageId)
             : q.translations[0];
 
-        // Update times shown
+        // Update times shown and last_shown_at
         await supabaseAdmin
             .from('marathon_question_queue')
             .update({
@@ -160,6 +237,12 @@ router.get('/next-question', authenticate, async (req, res) => {
                 last_shown_at: new Date().toISOString()
             })
             .eq('id', queueItem.id);
+
+        // Update session's last_question_id to prevent consecutive repeats
+        await supabaseAdmin
+            .from('marathon_sessions')
+            .update({ last_question_id: q.id })
+            .eq('id', session_id);
 
         res.json({
             queue_id: queueItem.id,
@@ -178,7 +261,7 @@ router.get('/next-question', authenticate, async (req, res) => {
 
 /**
  * POST /api/marathon/answer
- * Submit answer (tracks time + correctness)
+ * Submit answer - correct answers master the question, wrong answers schedule delayed retry
  */
 router.post('/answer', authenticate, async (req, res) => {
     try {
@@ -213,33 +296,46 @@ router.post('/answer', authenticate, async (req, res) => {
             .eq('id', queue_id)
             .single();
 
-        // Update queue item with spaced repetition logic
+        // Update queue item based on answer correctness
         const timesCorrect = (queueItem?.times_correct || 0) + (isCorrect ? 1 : 0);
         const timesWrong = (queueItem?.times_wrong || 0) + (isCorrect ? 0 : 1);
 
-        // Determine if mastered (correct 3+ times in a row)
-        const isMastered = isCorrect && timesCorrect >= 3 && timesWrong === 0;
+        // Mastery: question is mastered on first correct answer
+        const isMastered = isCorrect;
 
-        // Calculate new priority
+        // For wrong answers, set next_show_at to delay reappearance
+        // The question will reappear after other questions have been shown
+        let nextShowAt: string | null = null;
+        if (!isCorrect) {
+            // Delay by approximately 30-60 seconds to allow ~5 other questions to be shown
+            // This creates an effective "show after N questions" behavior
+            const delaySeconds = 45; // Average time for ~5 questions
+            nextShowAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
+        }
+
+        // Calculate new priority (for ordering among eligible questions)
         let newPriority = queueItem?.priority || 0;
         if (isCorrect) {
-            newPriority += 10; // Show later
+            // Mastered, priority doesn't matter anymore
+            newPriority = 999;
         } else {
-            newPriority = Math.max(0, newPriority - 5); // Show sooner
+            // Wrong answer - will be shown again after delay, keep priority moderate
+            newPriority = Math.max(0, newPriority + 5);
         }
 
         await supabaseAdmin
             .from('marathon_question_queue')
             .update({
-                times_correct: isCorrect ? timesCorrect : 0, // Reset if wrong
+                times_correct: isCorrect ? timesCorrect : 0, // Reset streak if wrong
                 times_wrong: timesWrong,
                 priority: newPriority,
                 is_mastered: isMastered,
+                next_show_at: nextShowAt,
                 avg_time_seconds: time_taken_seconds
             })
             .eq('id', queue_id);
 
-        // Save answer
+        // Save answer record
         const { data: existingAnswers } = await supabaseAdmin
             .from('marathon_answers')
             .select('attempt_number')
@@ -279,7 +375,8 @@ router.post('/answer', authenticate, async (req, res) => {
             is_correct: isCorrect,
             correct_answer: question?.correct_answer_index,
             explanation: explanation,
-            is_mastered: isMastered
+            is_mastered: isMastered,
+            will_repeat: !isCorrect // Indicate to frontend that wrong questions will return
         });
     } catch (error) {
         console.error('Submit answer error:', error);

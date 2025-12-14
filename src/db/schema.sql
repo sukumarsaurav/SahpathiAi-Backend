@@ -394,6 +394,7 @@ CREATE TABLE IF NOT EXISTS marathon_sessions (
   questions_answered INT DEFAULT 0,
   correct_answers INT DEFAULT 0,
   questions_mastered INT DEFAULT 0,
+  last_question_id UUID REFERENCES questions(id), -- Tracks last shown question to prevent consecutive repeats
   started_at TIMESTAMPTZ DEFAULT NOW(),
   completed_at TIMESTAMPTZ
 );
