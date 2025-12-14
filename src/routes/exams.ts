@@ -95,53 +95,16 @@ router.get('/:examId/subjects', async (req, res) => {
         if (error) throw error;
 
         // Get test counts for each exam_subject
+        // Now that subject_id is properly set for both topic-wise and subject-wise tests,
+        // we simply count all tests linked to this exam_subject
         const subjectsWithCounts = await Promise.all(
             data.map(async (item: any) => {
-                // Count tests directly linked to this exam_subject
+                // Count all tests linked to this exam_subject (includes topic-wise and subject-wise)
                 const { count: directCount } = await supabaseAdmin
                     .from('tests')
                     .select('*', { count: 'exact', head: true })
                     .eq('subject_id', item.id)
                     .eq('is_active', true);
-
-                let topicBasedCount = 0;
-
-                // Count topic-based tests (tests whose questions belong to topics of this subject)
-                // This replaces the old "exam-wide" count with a more accurate topic-based count
-                // Get topics for this master subject (shared or exam-specific)
-                const { data: topics } = await supabaseAdmin
-                    .from('topics')
-                    .select('id')
-                    .eq('subject_id', item.subject_id) // Master subject ID
-                    .or(`exam_id.is.null,exam_id.eq.${examId}`);
-
-                const topicIds = topics?.map(t => t.id) || [];
-
-                if (topicIds.length > 0) {
-                    // Get unique test IDs that have questions from these topics
-                    const { data: testQuestions } = await supabaseAdmin
-                        .from('test_questions')
-                        .select('test_id, question:questions!inner(topic_id)')
-                        .in('question.topic_id', topicIds);
-
-                    if (testQuestions && testQuestions.length > 0) {
-                        // Get unique test IDs
-                        const uniqueTestIds = [...new Set(testQuestions.map(tq => tq.test_id))];
-
-                        // Count active tests that aren't already counted as direct subject tests
-                        // (subject_id is null means they're topic-wise, not subject-specific)
-                        const { count } = await supabaseAdmin
-                            .from('tests')
-                            .select('*', { count: 'exact', head: true })
-                            .in('id', uniqueTestIds)
-                            .is('subject_id', null)
-                            .eq('is_active', true);
-
-                        topicBasedCount = count || 0;
-                    }
-                }
-
-                const totalCount = (directCount || 0) + topicBasedCount;
 
                 return {
                     ...item,
@@ -149,7 +112,7 @@ router.get('/:examId/subjects', async (req, res) => {
                     icon: item.subject?.icon,
                     color: item.subject?.color,
                     description: item.subject?.description,
-                    testCount: totalCount,
+                    testCount: directCount || 0,
                     // Keep original subject object accessible if needed
                     subject_details: item.subject
                 };
