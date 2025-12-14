@@ -41,18 +41,20 @@ router.get('/categories', optionalAuth, async (req, res) => {
 
 /**
  * GET /api/tests/category/:categoryId
- * Get tests by category
+ * Get tests by category (optionally filtered by exam)
+ * Query params: examId (optional) - filter by exam
  */
 router.get('/category/:categoryId', async (req, res) => {
     try {
         const { categoryId } = req.params;
+        const { examId } = req.query;
 
         // If categoryId is a UUID, use it directly.
         // If it's a slug (e.g., 'topic-wise'), resolve it first.
         let targetId = categoryId;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
 
-        console.log(`[TestsAPI] Fetching tests for category: "${categoryId}" (IsUUID: ${isUuid})`);
+        console.log(`[TestsAPI] Fetching tests for category: "${categoryId}" (IsUUID: ${isUuid}), examId: ${examId || 'all'}`);
 
         if (!isUuid) {
             const { data: cat, error: catError } = await supabaseAdmin
@@ -72,20 +74,27 @@ router.get('/category/:categoryId', async (req, res) => {
             }
         }
 
-        // REMOVED 'subject:exam_subjects(*)' because it causes 500 error if FK is missing or not detected
-        const { data, error } = await supabaseAdmin
+        // Build query with optional exam filter
+        let query = supabaseAdmin
             .from('tests')
             .select('*, test_questions(count)')
             .eq('test_category_id', targetId)
-            .eq('is_active', true)
-            .order('created_at', { ascending: false });
+            .eq('is_active', true);
+
+        // Apply exam filter if provided
+        if (examId && typeof examId === 'string') {
+            query = query.eq('exam_id', examId);
+            console.log(`[TestsAPI] Filtering by exam_id: ${examId}`);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: false });
 
         if (error) {
             console.error('[TestsAPI] Query error:', error);
             throw error;
         }
 
-        console.log(`[TestsAPI] Found ${data?.length} tests for category ID ${targetId}`);
+        console.log(`[TestsAPI] Found ${data?.length} tests for category ID ${targetId}${examId ? ` and exam ${examId}` : ''}`);
 
         // Map data to include total_questions from the count
         const testsWithCount = data.map(test => ({
