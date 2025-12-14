@@ -27,6 +27,7 @@ import subscriptionRoutes from './routes/subscription';
 import referralRoutes from './routes/referral';
 import adminRoutes from './routes/admin';
 import resourceRoutes from './routes/resources';
+import paymentRoutes from './routes/payment';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -75,6 +76,7 @@ app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/referral', referralRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/resources', resourceRoutes);
+app.use('/api/payment', paymentRoutes);
 
 // Error handling middleware
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
