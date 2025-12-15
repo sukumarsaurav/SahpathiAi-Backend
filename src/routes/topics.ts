@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase, supabaseAdmin } from '../db/supabase';
+import { cache } from '../utils/cache';
 
 const router = Router();
 
@@ -76,6 +77,13 @@ router.get('/:topicId/questions', async (req, res) => {
     try {
         const { topicId } = req.params;
         const { language_id } = req.query;
+        const langId = language_id as string | undefined;
+
+        // Try cache first
+        const cached = await cache.getTopicQuestions(topicId, langId);
+        if (cached) {
+            return res.json(cached);
+        }
 
         // Get questions with translations
         const { data, error } = await supabase
@@ -90,14 +98,18 @@ router.get('/:topicId/questions', async (req, res) => {
         if (error) throw error;
 
         // Filter translations if language specified
-        if (language_id && data) {
+        if (langId && data) {
             const filtered = data.map(q => ({
                 ...q,
-                translation: q.translations.find((t: any) => t.language_id === language_id) || q.translations[0]
+                translation: q.translations.find((t: any) => t.language_id === langId) || q.translations[0]
             }));
+            // Cache filtered result
+            await cache.setTopicQuestions(topicId, filtered, langId);
             return res.json(filtered);
         }
 
+        // Cache full result
+        await cache.setTopicQuestions(topicId, data || []);
         res.json(data);
     } catch (error) {
         console.error('Get questions error:', error);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../db/supabase';
 import { optionalAuth } from '../middleware/auth';
+import { cache } from '../utils/cache';
 
 const router = Router();
 
@@ -13,6 +14,16 @@ router.get('/:id', optionalAuth, async (req, res) => {
         const { id } = req.params;
         const languageId = req.user?.preferred_language_id || req.query.language_id;
 
+        // Try cache first
+        const cached = await cache.getQuestion(id);
+        if (cached) {
+            const translation = languageId
+                ? cached.translations?.find((t: any) => t.language_id === languageId)
+                : cached.translations?.[0];
+            return res.json({ ...cached, translation });
+        }
+
+        // Fetch from DB
         const { data, error } = await supabase
             .from('questions')
             .select(`
@@ -25,6 +36,9 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
         if (error) throw error;
 
+        // Cache the result
+        await cache.setQuestion(id, data);
+
         // Get preferred translation
         const translation = languageId
             ? data.translations.find((t: any) => t.language_id === languageId)
@@ -36,6 +50,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch question' });
     }
 });
+
 
 /**
  * GET /api/questions/:id/exam-history
