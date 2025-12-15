@@ -2095,4 +2095,256 @@ router.post('/seed', async (req, res) => {
     }
 });
 
+// --- SUPPORT ---
+
+// GET /api/admin/support/tickets - Get all support tickets with filters
+router.get('/support/tickets', async (req, res) => {
+    try {
+        const { status, priority, page = 1, limit = 20, search } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('support_tickets')
+            .select(`
+                *,
+                user:users(id, email, full_name, avatar_url),
+                assigned:users!support_tickets_assigned_to_fkey(id, full_name)
+            `, { count: 'exact' })
+            .order('created_at', { ascending: false });
+
+        if (status && status !== 'all') {
+            query = query.eq('status', status);
+        }
+        if (priority && priority !== 'all') {
+            query = query.eq('priority', priority);
+        }
+        if (search) {
+            query = query.or(`ticket_number.ilike.%${search}%,subject.ilike.%${search}%`);
+        }
+
+        query = query.range(offset, offset + Number(limit) - 1);
+
+        const { data, error, count } = await query;
+
+        if (error) throw error;
+
+        res.json({
+            tickets: data || [],
+            total: count || 0,
+            page: Number(page),
+            totalPages: Math.ceil((count || 0) / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching support tickets:', error);
+        res.status(500).json({ error: 'Failed to fetch support tickets' });
+    }
+});
+
+// GET /api/admin/support/tickets/:id - Get single ticket with messages
+router.get('/support/tickets/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const { data: ticket, error } = await supabase
+            .from('support_tickets')
+            .select(`
+                *,
+                user:users(id, email, full_name, avatar_url),
+                assigned:users!support_tickets_assigned_to_fkey(id, full_name)
+            `)
+            .eq('id', id)
+            .single();
+
+        if (error || !ticket) {
+            return res.status(404).json({ error: 'Ticket not found' });
+        }
+
+        // Get messages
+        const { data: messages } = await supabase
+            .from('support_messages')
+            .select(`
+                *,
+                sender:users(id, full_name, avatar_url, role)
+            `)
+            .eq('ticket_id', id)
+            .order('created_at', { ascending: true });
+
+        res.json({ ticket, messages: messages || [] });
+    } catch (error) {
+        console.error('Error fetching support ticket:', error);
+        res.status(500).json({ error: 'Failed to fetch support ticket' });
+    }
+});
+
+// PUT /api/admin/support/tickets/:id - Update ticket status/priority/assignment
+router.put('/support/tickets/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status, priority, assigned_to } = req.body;
+
+        const updateData: any = { updated_at: new Date().toISOString() };
+
+        if (status) updateData.status = status;
+        if (priority) updateData.priority = priority;
+        if (assigned_to !== undefined) updateData.assigned_to = assigned_to || null;
+
+        if (status === 'resolved') {
+            updateData.resolved_at = new Date().toISOString();
+        }
+
+        const { data, error } = await supabase
+            .from('support_tickets')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating support ticket:', error);
+        res.status(500).json({ error: 'Failed to update support ticket' });
+    }
+});
+
+// POST /api/admin/support/tickets/:id/messages - Admin reply to ticket
+router.post('/support/tickets/:id/messages', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { message } = req.body;
+        const adminId = (req as any).user?.id;
+
+        if (!message) {
+            return res.status(400).json({ error: 'Message is required' });
+        }
+
+        // Verify ticket exists
+        const { data: ticket, error: ticketError } = await supabase
+            .from('support_tickets')
+            .select('id, status')
+            .eq('id', id)
+            .single();
+
+        if (ticketError || !ticket) {
+            return res.status(404).json({ error: 'Ticket not found' });
+        }
+
+        // Create the message
+        const { data: newMessage, error } = await supabase
+            .from('support_messages')
+            .insert({
+                ticket_id: id,
+                sender_id: adminId,
+                message,
+                is_from_admin: true
+            })
+            .select(`
+                *,
+                sender:users(id, full_name, avatar_url, role)
+            `)
+            .single();
+
+        if (error) throw error;
+
+        // Update ticket status to in_progress if it was open
+        if (ticket.status === 'open') {
+            await supabase
+                .from('support_tickets')
+                .update({
+                    status: 'in_progress',
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', id);
+        } else {
+            await supabase
+                .from('support_tickets')
+                .update({ updated_at: new Date().toISOString() })
+                .eq('id', id);
+        }
+
+        res.status(201).json(newMessage);
+    } catch (error) {
+        console.error('Error sending admin reply:', error);
+        res.status(500).json({ error: 'Failed to send reply' });
+    }
+});
+
+// GET /api/admin/support/stats - Support statistics
+router.get('/support/stats', async (req, res) => {
+    try {
+        // Total tickets
+        const { count: totalTickets } = await supabase
+            .from('support_tickets')
+            .select('*', { count: 'exact', head: true });
+
+        // Open tickets
+        const { count: openTickets } = await supabase
+            .from('support_tickets')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'open');
+
+        // In progress tickets
+        const { count: inProgressTickets } = await supabase
+            .from('support_tickets')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'in_progress');
+
+        // Resolved tickets
+        const { count: resolvedTickets } = await supabase
+            .from('support_tickets')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'resolved');
+
+        // Tickets by issue type
+        const { data: ticketsByType } = await supabase
+            .from('support_tickets')
+            .select('issue_type');
+
+        const typeCount: Record<string, number> = {};
+        (ticketsByType || []).forEach((t: any) => {
+            typeCount[t.issue_type] = (typeCount[t.issue_type] || 0) + 1;
+        });
+
+        // Tickets created in last 7 days
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count: recentTickets } = await supabase
+            .from('support_tickets')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', sevenDaysAgo);
+
+        // Average resolution time (for resolved tickets in last 30 days)
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: resolvedRecent } = await supabase
+            .from('support_tickets')
+            .select('created_at, resolved_at')
+            .eq('status', 'resolved')
+            .not('resolved_at', 'is', null)
+            .gt('resolved_at', thirtyDaysAgo);
+
+        let avgResolutionHours = 0;
+        if (resolvedRecent && resolvedRecent.length > 0) {
+            const totalHours = resolvedRecent.reduce((sum: number, t: any) => {
+                const created = new Date(t.created_at).getTime();
+                const resolved = new Date(t.resolved_at).getTime();
+                return sum + (resolved - created) / (1000 * 60 * 60);
+            }, 0);
+            avgResolutionHours = Math.round(totalHours / resolvedRecent.length);
+        }
+
+        res.json({
+            total_tickets: totalTickets || 0,
+            open_tickets: openTickets || 0,
+            in_progress_tickets: inProgressTickets || 0,
+            resolved_tickets: resolvedTickets || 0,
+            tickets_by_type: typeCount,
+            recent_tickets_7d: recentTickets || 0,
+            avg_resolution_hours: avgResolutionHours
+        });
+    } catch (error) {
+        console.error('Error fetching support stats:', error);
+        res.status(500).json({ error: 'Failed to fetch support stats' });
+    }
+});
+
 export default router;

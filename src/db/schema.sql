@@ -587,19 +587,43 @@ CREATE TABLE IF NOT EXISTS user_learning_patterns (
 -- INDEXES FOR PERFORMANCE
 -- =====================================================
 
+-- Content tables indexes
 CREATE INDEX IF NOT EXISTS idx_exams_category ON exams(category_id);
 CREATE INDEX IF NOT EXISTS idx_exam_subjects_exam ON exam_subjects(exam_id);
-CREATE INDEX IF NOT EXISTS idx_topics_subject ON topics(exam_subject_id);
+CREATE INDEX IF NOT EXISTS idx_topics_subject ON topics(subject_id);
 CREATE INDEX IF NOT EXISTS idx_questions_topic ON questions(topic_id);
 CREATE INDEX IF NOT EXISTS idx_question_translations_question ON question_translations(question_id);
+CREATE INDEX IF NOT EXISTS idx_question_exam_history_question ON question_exam_history(question_id);
+
+-- Test tables indexes
 CREATE INDEX IF NOT EXISTS idx_test_attempts_user ON test_attempts(user_id);
 CREATE INDEX IF NOT EXISTS idx_test_attempts_test ON test_attempts(test_id);
+CREATE INDEX IF NOT EXISTS idx_test_attempts_user_date ON test_attempts(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_answers_attempt ON user_answers(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_user_answers_question ON user_answers(question_id);
+
+-- User interaction indexes
 CREATE INDEX IF NOT EXISTS idx_saved_questions_user ON saved_questions(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_mistakes_user ON user_mistakes(user_id);
+
+-- Custom test indexes
+CREATE INDEX IF NOT EXISTS idx_custom_tests_user ON custom_tests(user_id);
+CREATE INDEX IF NOT EXISTS idx_custom_test_questions_test ON custom_test_questions(custom_test_id);
+CREATE INDEX IF NOT EXISTS idx_custom_test_questions_order ON custom_test_questions(custom_test_id, order_index);
+
+-- Marathon mode indexes
 CREATE INDEX IF NOT EXISTS idx_marathon_sessions_user ON marathon_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_marathon_queue_session ON marathon_question_queue(session_id);
+CREATE INDEX IF NOT EXISTS idx_marathon_queue_session_priority ON marathon_question_queue(session_id, priority);
+CREATE INDEX IF NOT EXISTS idx_marathon_answers_session ON marathon_answers(session_id);
+
+-- Daily practice indexes
 CREATE INDEX IF NOT EXISTS idx_daily_sessions_user ON daily_practice_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_daily_questions_session ON daily_practice_questions(session_id);
+CREATE INDEX IF NOT EXISTS idx_daily_questions_order ON daily_practice_questions(session_id, order_index);
+CREATE INDEX IF NOT EXISTS idx_daily_progress_user_date ON daily_progress(user_id, practice_date);
+
+-- Payment/wallet indexes
 CREATE INDEX IF NOT EXISTS idx_wallet_transactions_wallet ON wallet_transactions(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_razorpay_id ON payment_orders(razorpay_order_id);
@@ -612,11 +636,28 @@ CREATE INDEX IF NOT EXISTS idx_question_concepts_concept ON question_concepts(co
 -- User concept stats indexes (critical for personalization)
 CREATE INDEX IF NOT EXISTS idx_user_concept_stats_user ON user_concept_stats(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_concept_stats_concept ON user_concept_stats(concept_id);
+CREATE INDEX IF NOT EXISTS idx_user_concept_stats_user_concept ON user_concept_stats(user_id, concept_id);
 CREATE INDEX IF NOT EXISTS idx_user_concept_stats_proficiency ON user_concept_stats(user_id, proficiency_level);
 CREATE INDEX IF NOT EXISTS idx_user_concept_stats_next_review ON user_concept_stats(user_id, next_review_date);
 
 -- Learning patterns index
 CREATE INDEX IF NOT EXISTS idx_user_learning_patterns_user ON user_learning_patterns(user_id);
+
+-- =====================================================
+-- PARTIAL INDEXES (Status-based queries optimization)
+-- =====================================================
+
+-- Active marathon sessions only
+CREATE INDEX IF NOT EXISTS idx_marathon_sessions_active ON marathon_sessions(user_id) 
+WHERE status = 'active';
+
+-- Unresolved mistakes only
+CREATE INDEX IF NOT EXISTS idx_user_mistakes_unresolved ON user_mistakes(user_id) 
+WHERE is_resolved = false;
+
+-- Active daily practice sessions
+CREATE INDEX IF NOT EXISTS idx_daily_sessions_active ON daily_practice_sessions(user_id) 
+WHERE status = 'active';
 
 -- =====================================================
 -- ROW LEVEL SECURITY (RLS)
