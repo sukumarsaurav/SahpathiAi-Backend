@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase } from '../db/supabase';
+import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -10,7 +10,7 @@ const router = Router();
  */
 router.get('/', authenticate, async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseAdmin
             .from('wallets')
             .select('*')
             .eq('user_id', req.user!.id)
@@ -34,7 +34,7 @@ router.get('/transactions', authenticate, async (req, res) => {
         const { limit = 20, offset = 0 } = req.query;
 
         // Get wallet ID
-        const { data: wallet } = await supabase
+        const { data: wallet } = await supabaseAdmin
             .from('wallets')
             .select('id')
             .eq('user_id', req.user!.id)
@@ -44,7 +44,7 @@ router.get('/transactions', authenticate, async (req, res) => {
             return res.json([]);
         }
 
-        const { data, error } = await supabase
+        const { data, error } = await supabaseAdmin
             .from('wallet_transactions')
             .select('*')
             .eq('wallet_id', wallet.id)
@@ -74,7 +74,7 @@ router.post('/add-money', authenticate, async (req, res) => {
 
         // In production, integrate with payment gateway (Razorpay, Stripe, etc.)
         // For now, simulate success
-        const { data: wallet } = await supabase
+        const { data: wallet } = await supabaseAdmin
             .from('wallets')
             .select('*')
             .eq('user_id', req.user!.id)
@@ -85,7 +85,7 @@ router.post('/add-money', authenticate, async (req, res) => {
         }
 
         // Add transaction
-        await supabase.from('wallet_transactions').insert({
+        await supabaseAdmin.from('wallet_transactions').insert({
             wallet_id: wallet.id,
             type: 'credit',
             amount,
@@ -97,7 +97,7 @@ router.post('/add-money', authenticate, async (req, res) => {
         const newBalance = (wallet.balance || 0) + amount;
         const newEarned = (wallet.total_earned || 0) + amount;
 
-        await supabase
+        await supabaseAdmin
             .from('wallets')
             .update({ balance: newBalance, total_earned: newEarned })
             .eq('id', wallet.id);
@@ -121,7 +121,7 @@ router.post('/withdraw', authenticate, async (req, res) => {
     try {
         const { amount } = req.body;
 
-        const { data: wallet } = await supabase
+        const { data: wallet } = await supabaseAdmin
             .from('wallets')
             .select('*')
             .eq('user_id', req.user!.id)
@@ -136,7 +136,7 @@ router.post('/withdraw', authenticate, async (req, res) => {
         }
 
         // Add transaction
-        await supabase.from('wallet_transactions').insert({
+        await supabaseAdmin.from('wallet_transactions').insert({
             wallet_id: wallet.id,
             type: 'debit',
             amount,
@@ -148,7 +148,7 @@ router.post('/withdraw', authenticate, async (req, res) => {
         const newBalance = wallet.balance - amount;
         const newSpent = (wallet.total_spent || 0) + amount;
 
-        await supabase
+        await supabaseAdmin
             .from('wallets')
             .update({ balance: newBalance, total_spent: newSpent })
             .eq('id', wallet.id);
