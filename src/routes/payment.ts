@@ -84,10 +84,16 @@ router.post('/create-order', authenticate, async (req, res) => {
         // Create Razorpay order for paid plans
         console.log('[Payment] Creating Razorpay order for amount:', amount);
 
+        // Create a short receipt (max 40 chars for Razorpay)
+        // Format: sub_<timestamp>_<last-8-chars-of-user-id>
+        const timestamp = Date.now();
+        const userIdShort = req.user!.id.slice(-8);
+        const receipt = `sub_${timestamp}_${userIdShort}`;
+
         const options = {
             amount: Math.round(amount * 100), // Razorpay expects amount in paise
             currency: 'INR',
-            receipt: `sub_${req.user!.id}_${Date.now()}`,
+            receipt: receipt,
             notes: {
                 user_id: req.user!.id,
                 plan_id: plan_id,
