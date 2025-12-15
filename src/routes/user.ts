@@ -326,4 +326,62 @@ router.post('/change-password', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/user/auth-type
+ * Get user's authentication provider type
+ */
+router.get('/auth-type', authenticate, async (req, res) => {
+    try {
+        const supabase = getAuthenticatedClient(getToken(req));
+        const { data: { user }, error } = await supabase.auth.getUser();
+
+        if (error || !user) {
+            return res.status(401).json({ error: 'Unable to get user info' });
+        }
+
+        // Get provider from app_metadata or identities
+        let provider = 'email'; // default
+
+        if (user.app_metadata?.provider) {
+            provider = user.app_metadata.provider;
+        } else if (user.identities && user.identities.length > 0) {
+            provider = user.identities[0].provider;
+        }
+
+        res.json({
+            provider,
+            email: user.email
+        });
+    } catch (error) {
+        console.error('Get auth type error:', error);
+        res.status(500).json({ error: 'Failed to get auth type' });
+    }
+});
+
+/**
+ * POST /api/user/forgot-password
+ * Send password reset email
+ */
+router.post('/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({ error: 'Email is required' });
+        }
+
+        const { error } = await supabaseAdmin.auth.resetPasswordForEmail(email, {
+            redirectTo: `${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?mode=reset-password`
+        });
+
+        if (error) throw error;
+
+        res.json({ message: 'Password reset email sent successfully' });
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({ error: 'Failed to send password reset email' });
+    }
+});
+
 export default router;
+
