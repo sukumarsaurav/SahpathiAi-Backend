@@ -284,7 +284,8 @@ router.post('/:id/submit', authenticate, async (req, res) => {
                 .eq('id', answer.question_id)
                 .single();
 
-            const isCorrect = question?.correct_answer_index === answer.selected_option;
+            const isSkipped = answer.selected_option === null;
+            const isCorrect = !isSkipped && question?.correct_answer_index === answer.selected_option;
             if (isCorrect) score++;
 
             // Save answer
@@ -293,10 +294,11 @@ router.post('/:id/submit', authenticate, async (req, res) => {
                 question_id: answer.question_id,
                 selected_option: answer.selected_option,
                 is_correct: isCorrect,
+                is_skipped: isSkipped,
                 time_taken_seconds: answer.time_taken || 0
             });
 
-            // Track mistake if wrong
+            // Track mistake if wrong (skipped also counts as mistake/unresolved)
             if (!isCorrect) {
                 mistakesToAdd.push({
                     user_id: req.user!.id,

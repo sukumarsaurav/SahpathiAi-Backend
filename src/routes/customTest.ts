@@ -207,7 +207,8 @@ router.post('/:testId/submit', authenticate, async (req, res) => {
                 .eq('id', testQuestion?.question_id)
                 .single();
 
-            const isCorrect = question?.correct_answer_index === answer.selected_option;
+            const isSkipped = answer.selected_option === null;
+            const isCorrect = !isSkipped && question?.correct_answer_index === answer.selected_option;
             if (isCorrect) score++;
 
             await supabaseAdmin
@@ -215,6 +216,7 @@ router.post('/:testId/submit', authenticate, async (req, res) => {
                 .update({
                     selected_option: answer.selected_option,
                     is_correct: isCorrect,
+                    is_skipped: isSkipped,
                     time_taken_seconds: answer.time_taken || 0,
                     answered_at: new Date().toISOString()
                 })
