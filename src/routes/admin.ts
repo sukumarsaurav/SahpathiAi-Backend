@@ -509,6 +509,121 @@ router.delete('/concepts/:id', async (req, res) => {
     }
 });
 
+// POST /api/admin/concepts/bulk
+// Bulk import concepts for a topic
+router.post('/concepts/bulk', async (req, res) => {
+    try {
+        const { topic_id, concepts } = req.body;
+
+        if (!topic_id) {
+            return res.status(400).json({
+                success: 0,
+                failed: 0,
+                message: 'topic_id is required',
+                errors: ['topic_id is required']
+            });
+        }
+
+        if (!Array.isArray(concepts) || concepts.length === 0) {
+            return res.status(400).json({
+                success: 0,
+                failed: 0,
+                message: 'concepts must be a non-empty array',
+                errors: ['concepts must be a non-empty array']
+            });
+        }
+
+        // Verify topic exists
+        const { data: topic, error: topicError } = await supabase
+            .from('topics')
+            .select('id, name')
+            .eq('id', topic_id)
+            .single();
+
+        if (topicError || !topic) {
+            return res.status(404).json({
+                success: 0,
+                failed: concepts.length,
+                message: 'Topic not found',
+                errors: ['Topic not found']
+            });
+        }
+
+        const results = { success: 0, failed: 0, errors: [] as string[] };
+
+        // Process each concept
+        for (let i = 0; i < concepts.length; i++) {
+            const concept = concepts[i];
+
+            // Validate concept data
+            if (!concept.name || typeof concept.name !== 'string') {
+                results.failed++;
+                results.errors.push(`Concept ${i + 1}: 'name' is required and must be a string`);
+                continue;
+            }
+
+            // Validate difficulty_level if provided
+            if (concept.difficulty_level !== undefined && concept.difficulty_level !== null) {
+                const level = Number(concept.difficulty_level);
+                if (isNaN(level) || level < 1 || level > 10) {
+                    results.failed++;
+                    results.errors.push(`Concept ${i + 1} (${concept.name}): 'difficulty_level' must be between 1 and 10`);
+                    continue;
+                }
+            }
+
+            // Insert concept
+            try {
+                const { error: insertError } = await supabase
+                    .from('concepts')
+                    .insert({
+                        topic_id,
+                        name: concept.name,
+                        description: concept.description || null,
+                        difficulty_level: concept.difficulty_level || 5,
+                        display_order: concept.display_order || 0,
+                        is_active: true
+                    });
+
+                if (insertError) {
+                    results.failed++;
+                    results.errors.push(`Concept ${i + 1} (${concept.name}): ${insertError.message}`);
+                } else {
+                    results.success++;
+                }
+            } catch (err: any) {
+                results.failed++;
+                results.errors.push(`Concept ${i + 1} (${concept.name}): ${err.message || 'Unknown error'}`);
+            }
+        }
+
+        // Generate message
+        let message = '';
+        if (results.success > 0 && results.failed === 0) {
+            message = `Successfully imported ${results.success} concept(s)`;
+        } else if (results.success === 0 && results.failed > 0) {
+            message = `Failed to import all ${results.failed} concept(s)`;
+        } else {
+            message = `Imported ${results.success} concept(s), ${results.failed} failed`;
+        }
+
+        res.status(results.success > 0 ? 200 : 400).json({
+            success: results.success,
+            failed: results.failed,
+            message,
+            errors: results.errors
+        });
+    } catch (error) {
+        console.error('Error bulk importing concepts:', error);
+        res.status(500).json({
+            success: 0,
+            failed: 0,
+            message: 'Server error during bulk import',
+            errors: [(error as Error).message || 'Unknown server error']
+        });
+    }
+});
+
 // --- QUESTION CONCEPTS (Linking) ---
 
 // GET /api/admin/question-concepts/:questionId
