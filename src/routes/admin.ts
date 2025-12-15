@@ -1087,6 +1087,46 @@ router.post('/questions/bulk', async (req, res) => {
                         // We'll still count as partial success
                     }
 
+                    // 3. Add Exam History if provided
+                    if (q.exam_history && Array.isArray(q.exam_history)) {
+                        for (const eh of q.exam_history) {
+                            if (eh.exam_id) {
+                                await supabase.from('question_exam_history').insert({
+                                    question_id: question.id,
+                                    exam_id: eh.exam_id,
+                                    year_asked: eh.year_asked || null,
+                                    paper_name: eh.paper_name || null
+                                });
+                            }
+                        }
+                    }
+
+                    // 4. Link Concepts by name if provided
+                    if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
+                        // Find concepts by name within the same topic
+                        const { data: topicConcepts } = await supabase
+                            .from('concepts')
+                            .select('id, name')
+                            .eq('topic_id', q.topic_id);
+
+                        if (topicConcepts) {
+                            const conceptMap = new Map(topicConcepts.map((c: any) => [c.name.toLowerCase(), c.id]));
+                            for (let ci = 0; ci < q.concept_names.length; ci++) {
+                                const conceptName = q.concept_names[ci];
+                                const conceptId = conceptMap.get(conceptName.toLowerCase());
+                                if (conceptId) {
+                                    await supabase.from('question_concepts').insert({
+                                        question_id: question.id,
+                                        concept_id: conceptId,
+                                        is_primary: ci === 0 // First concept is primary
+                                    });
+                                } else {
+                                    results.errors.push(`Question ${i + 1}: Concept '${conceptName}' not found in topic`);
+                                }
+                            }
+                        }
+                    }
+
                     results.success++;
                     results.created_question_ids.push(question.id);
 
@@ -1135,6 +1175,45 @@ router.post('/questions/bulk', async (req, res) => {
                             // Delete orphan question
                             await supabase.from('questions').delete().eq('id', question.id);
                             continue;
+                        }
+                    }
+
+                    // 3. Add Exam History if provided (single-language mode)
+                    if (q.exam_history && Array.isArray(q.exam_history)) {
+                        for (const eh of q.exam_history) {
+                            if (eh.exam_id) {
+                                await supabase.from('question_exam_history').insert({
+                                    question_id: question.id,
+                                    exam_id: eh.exam_id,
+                                    year_asked: eh.year_asked || null,
+                                    paper_name: eh.paper_name || null
+                                });
+                            }
+                        }
+                    }
+
+                    // 4. Link Concepts by name if provided (single-language mode)
+                    if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
+                        const { data: topicConcepts } = await supabase
+                            .from('concepts')
+                            .select('id, name')
+                            .eq('topic_id', q.topic_id);
+
+                        if (topicConcepts) {
+                            const conceptMap = new Map(topicConcepts.map((c: any) => [c.name.toLowerCase(), c.id]));
+                            for (let ci = 0; ci < q.concept_names.length; ci++) {
+                                const conceptName = q.concept_names[ci];
+                                const conceptId = conceptMap.get(conceptName.toLowerCase());
+                                if (conceptId) {
+                                    await supabase.from('question_concepts').insert({
+                                        question_id: question.id,
+                                        concept_id: conceptId,
+                                        is_primary: ci === 0
+                                    });
+                                } else {
+                                    results.errors.push(`Question ${i + 1}: Concept '${conceptName}' not found in topic`);
+                                }
+                            }
                         }
                     }
 
