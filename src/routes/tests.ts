@@ -353,6 +353,84 @@ router.post('/:id/submit', authenticate, async (req, res) => {
         // Update user stats
         await supabaseAdmin.rpc('update_user_stats', { user_id: req.user!.id });
 
+        // Check and complete referral if this is the user's first test
+        try {
+            const { data: referral } = await supabaseAdmin
+                .from('referrals')
+                .select('*, referrer:users!referrer_id(id)')
+                .eq('referred_id', req.user!.id)
+                .eq('status', 'pending')
+                .single();
+
+            if (referral) {
+                console.log('[Referral] Completing referral for user:', req.user!.id);
+
+                // Update referral status
+                await supabaseAdmin
+                    .from('referrals')
+                    .update({
+                        status: 'completed',
+                        completed_at: new Date().toISOString()
+                    })
+                    .eq('id', referral.id);
+
+                // Add reward to referrer's wallet
+                const { data: referrerWallet } = await supabaseAdmin
+                    .from('wallets')
+                    .select('*')
+                    .eq('user_id', (referral.referrer as any).id)
+                    .single();
+
+                if (referrerWallet) {
+                    await supabaseAdmin
+                        .from('wallets')
+                        .update({
+                            balance: referrerWallet.balance + referral.reward_amount,
+                            total_earned: (referrerWallet.total_earned || 0) + referral.reward_amount
+                        })
+                        .eq('id', referrerWallet.id);
+
+                    await supabaseAdmin.from('wallet_transactions').insert({
+                        wallet_id: referrerWallet.id,
+                        type: 'credit',
+                        amount: referral.reward_amount,
+                        description: 'Referral bonus',
+                        category: 'referral'
+                    });
+                }
+
+                // Add reward to referred user's wallet
+                const { data: userWallet } = await supabaseAdmin
+                    .from('wallets')
+                    .select('*')
+                    .eq('user_id', req.user!.id)
+                    .single();
+
+                if (userWallet) {
+                    await supabaseAdmin
+                        .from('wallets')
+                        .update({
+                            balance: userWallet.balance + referral.reward_amount,
+                            total_earned: (userWallet.total_earned || 0) + referral.reward_amount
+                        })
+                        .eq('id', userWallet.id);
+
+                    await supabaseAdmin.from('wallet_transactions').insert({
+                        wallet_id: userWallet.id,
+                        type: 'credit',
+                        amount: referral.reward_amount,
+                        description: 'Welcome bonus (referral)',
+                        category: 'referral'
+                    });
+                }
+
+                console.log('[Referral] Completed! Both users received ₹' + referral.reward_amount);
+            }
+        } catch (referralError) {
+            // Log but don't fail the test submission
+            console.log('[Referral] Error or no pending referral:', referralError);
+        }
+
         res.json({
             ...attempt,
             correct: score,
