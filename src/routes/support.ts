@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../db/supabase';
+import { supabaseAdmin as supabase } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
 
 const router = express.Router();
