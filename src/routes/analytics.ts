@@ -623,11 +623,18 @@ router.get('/daily-stats', authenticate, async (req, res) => {
             dailyAnswers = data || [];
         }
 
-        // Combine all answers
+        // Combine all answers for attempted/correct counting (includes marathon)
         const allAnswers = [
             ...testAnswers,
             ...customTestAnswers.filter(a => a.is_correct !== null),
             ...marathonAnswersData,
+            ...dailyAnswers.filter(a => a.is_correct !== null)
+        ];
+
+        // Answers for mistakes counting (excludes marathon - it's for learning, mistakes are expected)
+        const answersForMistakes = [
+            ...testAnswers,
+            ...customTestAnswers.filter(a => a.is_correct !== null),
             ...dailyAnswers.filter(a => a.is_correct !== null)
         ];
 
@@ -636,11 +643,17 @@ router.get('/daily-stats', authenticate, async (req, res) => {
         const correctQuestionIds = new Set<string>();
         let totalMistakes = 0;
 
+        // Count attempted and correct from all sources (including marathon)
         for (const answer of allAnswers) {
             uniqueQuestionIds.add(answer.question_id);
             if (answer.is_correct) {
                 correctQuestionIds.add(answer.question_id);
-            } else {
+            }
+        }
+
+        // Count mistakes only from non-marathon sources
+        for (const answer of answersForMistakes) {
+            if (!answer.is_correct) {
                 totalMistakes++;
             }
         }
