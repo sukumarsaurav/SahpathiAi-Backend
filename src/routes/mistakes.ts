@@ -155,7 +155,7 @@ router.get('/summary', authenticate, async (req, res) => {
             .eq('user_id', userId)
             .eq('is_resolved', false);
 
-        console.log('[Mistakes Summary] Total mistakes:', allMistakes?.length, 'Error:', mistakesError);
+        console.log('[Mistakes Summary] Total mistakes:', allMistakes?.length || 0);
 
         if (!allMistakes || allMistakes.length === 0) {
             return res.json({ total: 0, by_subject: {}, subjects: [] });
@@ -170,7 +170,10 @@ router.get('/summary', authenticate, async (req, res) => {
             .select('id, topic_id')
             .in('id', questionIds);
 
-        console.log('[Mistakes Summary] Questions found:', questions?.length, 'Error:', questionsError);
+        if (questionsError) {
+            console.error('[Mistakes Summary] Questions query failed:', questionsError);
+        }
+        console.log('[Mistakes Summary] Questions found:', questions?.length || 0);
 
         if (!questions || questions.length === 0) {
             return res.json({ total: allMistakes.length, by_subject: {}, subjects: [] });
@@ -190,7 +193,10 @@ router.get('/summary', authenticate, async (req, res) => {
             .select('id, subject_id')
             .in('id', topicIds);
 
-        console.log('[Mistakes Summary] Topics found:', topics?.length, 'Error:', topicsError);
+        if (topicsError) {
+            console.error('[Mistakes Summary] Topics query failed:', topicsError);
+        }
+        console.log('[Mistakes Summary] Topics found:', topics?.length || 0);
 
         if (!topics || topics.length === 0) {
             console.log('[Mistakes Summary] No topics found');
