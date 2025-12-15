@@ -68,6 +68,47 @@ router.put('/config', authenticate, async (req, res) => {
 });
 
 /**
+ * GET /api/daily-practice/today
+ * Get today's session status for resume functionality
+ */
+router.get('/today', authenticate, async (req, res) => {
+    try {
+        const userId = req.user!.id;
+
+        // Get start of today in UTC
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const { data: session, error } = await supabaseAdmin
+            .from('daily_practice_sessions')
+            .select('*')
+            .eq('user_id', userId)
+            .gte('started_at', today.toISOString())
+            .order('started_at', { ascending: false })
+            .limit(1)
+            .single();
+
+        if (error || !session) {
+            return res.json({ session_id: null, status: 'not_started' });
+        }
+
+        const status = session.status === 'completed' ? 'completed' : 'in_progress';
+
+        res.json({
+            session_id: session.id,
+            status: status,
+            questions_answered: session.questions_answered,
+            total_questions: session.total_questions,
+            correct_answers: session.correct_answers
+        });
+    } catch (error) {
+        // No session found - return not_started
+        console.log('No daily practice session found for today');
+        res.json({ session_id: null, status: 'not_started' });
+    }
+});
+
+/**
  * GET /api/daily-practice/stats
  * Get available question counts per category
  */
@@ -307,6 +348,56 @@ router.get('/session/:sessionId/next', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Get next question error:', error);
         res.status(500).json({ error: 'Failed to fetch question' });
+    }
+});
+
+/**
+ * GET /api/daily-practice/session/:sessionId/answered
+ * Get already answered questions for session resume
+ */
+router.get('/session/:sessionId/answered', authenticate, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+
+        const { data: answeredQuestions, error } = await supabaseAdmin
+            .from('daily_practice_questions')
+            .select(`
+                *,
+                question:questions(
+                    *,
+                    translations:question_translations(*, language:languages(*))
+                )
+            `)
+            .eq('session_id', sessionId)
+            .eq('is_answered', true)
+            .order('order_index');
+
+        if (error) throw error;
+
+        const questions = answeredQuestions?.map((item: any) => {
+            const q = item.question;
+            const languageId = req.user?.preferred_language_id;
+            const translation = languageId
+                ? q.translations?.find((t: any) => t.language_id === languageId)
+                : q.translations?.[0];
+
+            return {
+                id: item.id,
+                question_id: q.id,
+                question: translation?.question_text || q.question_text,
+                options: translation?.options || q.options,
+                category: item.category,
+                order: item.order_index + 1,
+                isCorrect: item.is_correct,
+                selectedOption: null, // We don't store this, but isCorrect is sufficient
+                isAnswered: true
+            };
+        }) || [];
+
+        res.json(questions);
+    } catch (error) {
+        console.error('Get answered questions error:', error);
+        res.status(500).json({ error: 'Failed to fetch answered questions' });
     }
 });
 
