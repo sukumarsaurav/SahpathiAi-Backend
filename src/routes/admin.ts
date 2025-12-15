@@ -633,10 +633,27 @@ router.get('/questions/:id', async (req, res) => {
             console.error('Error fetching translations:', tError);
         }
 
+        // Get exam history
+        const { data: examHistory, error: ehError } = await supabase
+            .from('question_exam_history')
+            .select(`
+                id,
+                exam_id,
+                year_asked,
+                paper_name,
+                exam:exams (id, name)
+            `)
+            .eq('question_id', id);
+
+        if (ehError) {
+            console.error('Error fetching exam history:', ehError);
+        }
+
         res.json({
             ...question,
             topic,
-            translations: translations || []
+            translations: translations || [],
+            exam_history: examHistory || []
         });
     } catch (error) {
         console.error('Error fetching question:', error);
@@ -647,7 +664,7 @@ router.get('/questions/:id', async (req, res) => {
 // POST /api/admin/questions - Create new question
 router.post('/questions', async (req, res) => {
     try {
-        const { topic_id, difficulty, correct_answer_index, translations } = req.body;
+        const { topic_id, difficulty, correct_answer_index, translations, exam_history } = req.body;
 
         // 1. Create Question Core
         const { data: question, error: qError } = await supabase
@@ -676,7 +693,27 @@ router.post('/questions', async (req, res) => {
                 .from('question_translations')
                 .insert(translationInserts);
 
-            if (tError) throw tError; // Note: If this fails, we have an orphan question. Transaction needed ideally.
+            if (tError) throw tError;
+        }
+
+        // 3. Create Exam History
+        if (exam_history && exam_history.length > 0) {
+            const examHistoryInserts = exam_history
+                .filter((eh: any) => eh.exam_id) // Only insert entries with exam_id
+                .map((eh: any) => ({
+                    question_id: question.id,
+                    exam_id: eh.exam_id,
+                    year_asked: eh.year_asked || null,
+                    paper_name: eh.paper_name || null
+                }));
+
+            if (examHistoryInserts.length > 0) {
+                const { error: ehError } = await supabase
+                    .from('question_exam_history')
+                    .insert(examHistoryInserts);
+
+                if (ehError) throw ehError;
+            }
         }
 
         res.status(201).json(question);
@@ -690,7 +727,7 @@ router.post('/questions', async (req, res) => {
 router.put('/questions/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { topic_id, difficulty, correct_answer_index, translations } = req.body;
+        const { topic_id, difficulty, correct_answer_index, translations, exam_history } = req.body;
 
         // 1. Update Core
         const { error: qError } = await supabase
@@ -717,6 +754,37 @@ router.put('/questions/:id', async (req, res) => {
                 .upsert(translationUpserts);
 
             if (tError) throw tError;
+        }
+
+        // 3. Update Exam History (Delete all and re-insert)
+        if (exam_history !== undefined) {
+            // Delete existing exam history for this question
+            const { error: deleteError } = await supabase
+                .from('question_exam_history')
+                .delete()
+                .eq('question_id', id);
+
+            if (deleteError) throw deleteError;
+
+            // Insert new exam history entries
+            if (exam_history && exam_history.length > 0) {
+                const examHistoryInserts = exam_history
+                    .filter((eh: any) => eh.exam_id) // Only insert entries with exam_id
+                    .map((eh: any) => ({
+                        question_id: id,
+                        exam_id: eh.exam_id,
+                        year_asked: eh.year_asked || null,
+                        paper_name: eh.paper_name || null
+                    }));
+
+                if (examHistoryInserts.length > 0) {
+                    const { error: ehError } = await supabase
+                        .from('question_exam_history')
+                        .insert(examHistoryInserts);
+
+                    if (ehError) throw ehError;
+                }
+            }
         }
 
         res.json({ success: true });
