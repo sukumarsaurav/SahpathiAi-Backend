@@ -13,9 +13,19 @@ router.post('/create-order', authenticate, async (req, res) => {
     try {
         const { plan_id, billing_cycle = 'monthly' } = req.body;
 
+        console.log('[Payment] Creating order for plan:', plan_id, 'billing:', billing_cycle);
+
         if (!plan_id) {
             return res.status(400).json({ error: 'Plan ID is required' });
         }
+
+        // Check if Razorpay credentials are configured
+        if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+            console.error('[Payment] Razorpay credentials not configured');
+            return res.status(500).json({ error: 'Payment gateway not configured. Please contact support.' });
+        }
+
+        console.log('[Payment] Razorpay credentials present');
 
         // Get plan details
         const { data: plan, error: planError } = await supabaseAdmin
@@ -25,14 +35,19 @@ router.post('/create-order', authenticate, async (req, res) => {
             .single();
 
         if (planError || !plan) {
+            console.error('[Payment] Plan not found:', planError);
             return res.status(404).json({ error: 'Plan not found' });
         }
+
+        console.log('[Payment] Plan found:', plan.name, 'Price:', plan.price_monthly);
 
         // Get price based on billing cycle
         const amount = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
 
         // If free plan, activate directly without payment
         if (amount === 0) {
+            console.log('[Payment] Free plan detected, activating directly');
+
             // Cancel existing subscription
             await supabaseAdmin
                 .from('user_subscriptions')
@@ -53,8 +68,12 @@ router.post('/create-order', authenticate, async (req, res) => {
                 .select('*, plan:subscription_plans(*)')
                 .single();
 
-            if (subError) throw subError;
+            if (subError) {
+                console.error('[Payment] Error creating free subscription:', subError);
+                throw subError;
+            }
 
+            console.log('[Payment] Free subscription activated');
             return res.json({
                 success: true,
                 is_free: true,
@@ -63,6 +82,8 @@ router.post('/create-order', authenticate, async (req, res) => {
         }
 
         // Create Razorpay order for paid plans
+        console.log('[Payment] Creating Razorpay order for amount:', amount);
+
         const options = {
             amount: Math.round(amount * 100), // Razorpay expects amount in paise
             currency: 'INR',
@@ -74,43 +95,64 @@ router.post('/create-order', authenticate, async (req, res) => {
             }
         };
 
-        const razorpayOrder = await razorpay.orders.create(options);
+        console.log('[Payment] Razorpay order options:', JSON.stringify(options, null, 2));
 
-        // Store order in database
-        const { data: paymentOrder, error: orderError } = await supabaseAdmin
-            .from('payment_orders')
-            .insert({
-                user_id: req.user!.id,
-                razorpay_order_id: razorpayOrder.id,
-                plan_id,
-                billing_cycle,
-                amount,
-                currency: 'INR',
-                status: 'created'
-            })
-            .select()
-            .single();
+        try {
+            const razorpayOrder = await razorpay.orders.create(options);
+            console.log('[Payment] Razorpay order created:', razorpayOrder.id);
 
-        if (orderError) throw orderError;
+            // Store order in database
+            const { data: paymentOrder, error: orderError } = await supabaseAdmin
+                .from('payment_orders')
+                .insert({
+                    user_id: req.user!.id,
+                    razorpay_order_id: razorpayOrder.id,
+                    plan_id,
+                    billing_cycle,
+                    amount,
+                    currency: 'INR',
+                    status: 'created'
+                })
+                .select()
+                .single();
 
-        res.json({
-            success: true,
-            is_free: false,
-            order: {
-                id: razorpayOrder.id,
-                amount: razorpayOrder.amount,
-                currency: razorpayOrder.currency,
-                key_id: process.env.RAZORPAY_KEY_ID
-            },
-            plan: {
-                id: plan.id,
-                name: plan.name,
-                price: amount
-            }
+            if (orderError) throw orderError;
+
+            res.json({
+                success: true,
+                is_free: false,
+                order: {
+                    id: razorpayOrder.id,
+                    amount: razorpayOrder.amount,
+                    currency: razorpayOrder.currency,
+                    key_id: process.env.RAZORPAY_KEY_ID
+                },
+                plan: {
+                    id: plan.id,
+                    name: plan.name,
+                    price: amount
+                }
+            });
+        } catch (razorpayError: any) {
+            console.error('[Payment] Razorpay order creation failed:', razorpayError);
+            console.error('[Payment] Razorpay error details:', {
+                message: razorpayError.message,
+                description: razorpayError.description,
+                statusCode: razorpayError.statusCode,
+                error: razorpayError.error
+            });
+            return res.status(500).json({
+                error: 'Failed to create payment order with Razorpay',
+                details: razorpayError.description || razorpayError.message
+            });
+        }
+    } catch (error: any) {
+        console.error('[Payment] Create order error:', error);
+        console.error('[Payment] Error stack:', error.stack);
+        res.status(500).json({
+            error: 'Failed to create payment order',
+            details: error.message
         });
-    } catch (error) {
-        console.error('Create order error:', error);
-        res.status(500).json({ error: 'Failed to create payment order' });
     }
 });
 
