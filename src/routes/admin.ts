@@ -421,6 +421,176 @@ router.get('/topics/by-exam-subject/:examSubjectId', async (req, res) => {
     }
 });
 
+// --- CONCEPTS ---
+
+// GET /api/admin/concepts
+// Get concepts for a specific topic
+router.get('/concepts', async (req, res) => {
+    try {
+        const { topicId } = req.query;
+        let query = supabase
+            .from('concepts')
+            .select(`
+                *,
+                topic:topics (id, name, subject_id)
+            `)
+            .order('display_order')
+            .order('name');
+
+        if (topicId) {
+            query = query.eq('topic_id', topicId);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching concepts:', error);
+        res.status(500).json({ error: 'Failed to fetch concepts' });
+    }
+});
+
+// POST /api/admin/concepts
+router.post('/concepts', async (req, res) => {
+    try {
+        const { topic_id, name, description, difficulty_level, display_order } = req.body;
+        const { data, error } = await supabase
+            .from('concepts')
+            .insert({
+                topic_id,
+                name,
+                description,
+                difficulty_level: difficulty_level || 5,
+                display_order: display_order || 0
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating concept:', error);
+        res.status(500).json({ error: 'Failed to create concept' });
+    }
+});
+
+// PUT /api/admin/concepts/:id
+router.put('/concepts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { topic_id, name, description, difficulty_level, display_order, is_active } = req.body;
+        const { error } = await supabase
+            .from('concepts')
+            .update({ topic_id, name, description, difficulty_level, display_order, is_active })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating concept:', error);
+        res.status(500).json({ error: 'Failed to update concept' });
+    }
+});
+
+// DELETE /api/admin/concepts/:id
+router.delete('/concepts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('concepts')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting concept:', error);
+        res.status(500).json({ error: 'Failed to delete concept' });
+    }
+});
+
+// --- QUESTION CONCEPTS (Linking) ---
+
+// GET /api/admin/question-concepts/:questionId
+// Get concepts linked to a specific question
+router.get('/question-concepts/:questionId', async (req, res) => {
+    try {
+        const { questionId } = req.params;
+        const { data, error } = await supabase
+            .from('question_concepts')
+            .select(`
+                id,
+                question_id,
+                concept_id,
+                is_primary,
+                concept:concepts (id, name, description, topic_id)
+            `)
+            .eq('question_id', questionId);
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching question concepts:', error);
+        res.status(500).json({ error: 'Failed to fetch question concepts' });
+    }
+});
+
+// POST /api/admin/question-concepts
+// Link a concept to a question
+router.post('/question-concepts', async (req, res) => {
+    try {
+        const { question_id, concept_id, is_primary } = req.body;
+        const { data, error } = await supabase
+            .from('question_concepts')
+            .insert({ question_id, concept_id, is_primary: is_primary || false })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error linking concept:', error);
+        res.status(500).json({ error: 'Failed to link concept' });
+    }
+});
+
+// PUT /api/admin/question-concepts/:id
+// Update a question-concept link (e.g., change is_primary)
+router.put('/question-concepts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { is_primary } = req.body;
+        const { error } = await supabase
+            .from('question_concepts')
+            .update({ is_primary })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating question concept:', error);
+        res.status(500).json({ error: 'Failed to update question concept' });
+    }
+});
+
+// DELETE /api/admin/question-concepts/:id
+// Unlink a concept from a question
+router.delete('/question-concepts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('question_concepts')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error unlinking concept:', error);
+        res.status(500).json({ error: 'Failed to unlink concept' });
+    }
+});
+
 // --- QUESTIONS ---
 
 // GET /api/admin/questions - List questions with pagination & filtering

@@ -113,6 +113,32 @@ CREATE TABLE IF NOT EXISTS question_exam_history (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- =====================================================
+-- CONCEPT TABLES (for personalized learning)
+-- =====================================================
+
+-- Concepts (smallest learning units)
+CREATE TABLE IF NOT EXISTS concepts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  topic_id UUID REFERENCES topics(id) ON DELETE CASCADE,
+  name VARCHAR(200) NOT NULL,
+  description TEXT,
+  difficulty_level INT DEFAULT 5 CHECK (difficulty_level >= 1 AND difficulty_level <= 10),
+  is_active BOOLEAN DEFAULT true,
+  display_order INT DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Question Concepts (link questions with concepts)
+CREATE TABLE IF NOT EXISTS question_concepts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  question_id UUID REFERENCES questions(id) ON DELETE CASCADE,
+  concept_id UUID REFERENCES concepts(id) ON DELETE CASCADE,
+  is_primary BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(question_id, concept_id)
+);
+
 -- Resources (learning materials)
 CREATE TABLE IF NOT EXISTS resources (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -336,6 +362,8 @@ CREATE TABLE IF NOT EXISTS user_answers (
   selected_option INT,
   is_correct BOOLEAN DEFAULT false,
   time_taken_seconds INT DEFAULT 0,
+  duration_seconds DECIMAL(10, 2),
+  is_skipped BOOLEAN DEFAULT false,
   answered_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -392,6 +420,7 @@ CREATE TABLE IF NOT EXISTS custom_test_questions (
   selected_option INT,
   is_correct BOOLEAN,
   time_taken_seconds DECIMAL(10, 2),
+  is_skipped BOOLEAN DEFAULT false,
   answered_at TIMESTAMPTZ
 );
 
@@ -438,6 +467,7 @@ CREATE TABLE IF NOT EXISTS marathon_answers (
   selected_option INT,
   is_correct BOOLEAN DEFAULT false,
   time_taken_seconds DECIMAL(10, 2),
+  is_skipped BOOLEAN DEFAULT false,
   attempt_number INT DEFAULT 1,
   answered_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -480,7 +510,77 @@ CREATE TABLE IF NOT EXISTS daily_practice_questions (
   is_answered BOOLEAN DEFAULT false,
   is_correct BOOLEAN,
   time_taken_seconds DECIMAL(10, 2),
+  is_skipped BOOLEAN DEFAULT false,
   answered_at TIMESTAMPTZ
+);
+
+-- =====================================================
+-- USER KNOWLEDGE TRACKING TABLES
+-- =====================================================
+
+-- User Concept Stats (build user knowledge map)
+CREATE TABLE IF NOT EXISTS user_concept_stats (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  concept_id UUID REFERENCES concepts(id) ON DELETE CASCADE,
+  
+  -- Attempt Statistics
+  total_attempts INT DEFAULT 0,
+  correct_attempts INT DEFAULT 0,
+  
+  -- Performance Metrics
+  accuracy_rate DECIMAL(5, 2) DEFAULT 0,
+  avg_time_seconds DECIMAL(10, 2),
+  
+  -- Proficiency Classification
+  proficiency_level VARCHAR(20) DEFAULT 'unknown' 
+    CHECK (proficiency_level IN ('unknown', 'weak', 'developing', 'medium', 'strong', 'mastered')),
+  confidence_score DECIMAL(5, 2) DEFAULT 0,
+  
+  -- Temporal Tracking
+  last_practiced TIMESTAMPTZ,
+  next_review_date DATE,
+  
+  -- Trend Analysis
+  recent_trend VARCHAR(20) DEFAULT 'stable'
+    CHECK (recent_trend IN ('declining', 'stable', 'improving')),
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, concept_id)
+);
+
+-- User Learning Patterns (track overall study behavior)
+CREATE TABLE IF NOT EXISTS user_learning_patterns (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  
+  -- Study Time Patterns
+  preferred_study_hours JSONB,
+  avg_session_duration_minutes INT DEFAULT 0,
+  avg_questions_per_session INT DEFAULT 0,
+  
+  -- Performance Patterns
+  peak_performance_hour INT,
+  optimal_difficulty VARCHAR(20) DEFAULT 'medium',
+  fatigue_threshold_minutes INT,
+  
+  -- Behavior Patterns
+  preferred_question_pace VARCHAR(20) DEFAULT 'normal'
+    CHECK (preferred_question_pace IN ('slow', 'normal', 'fast')),
+  skip_tendency DECIMAL(5, 2) DEFAULT 0,
+  review_tendency DECIMAL(5, 2) DEFAULT 0,
+  
+  -- Consistency Metrics
+  weekly_practice_days INT DEFAULT 0,
+  consistency_score DECIMAL(5, 2) DEFAULT 0,
+  
+  -- Strength/Weakness Summary
+  strongest_subject_ids JSONB,
+  weakest_subject_ids JSONB,
+  
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- =====================================================
@@ -503,6 +603,20 @@ CREATE INDEX IF NOT EXISTS idx_daily_sessions_user ON daily_practice_sessions(us
 CREATE INDEX IF NOT EXISTS idx_wallet_transactions_wallet ON wallet_transactions(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_razorpay_id ON payment_orders(razorpay_order_id);
+
+-- Concept indexes
+CREATE INDEX IF NOT EXISTS idx_concepts_topic ON concepts(topic_id);
+CREATE INDEX IF NOT EXISTS idx_question_concepts_question ON question_concepts(question_id);
+CREATE INDEX IF NOT EXISTS idx_question_concepts_concept ON question_concepts(concept_id);
+
+-- User concept stats indexes (critical for personalization)
+CREATE INDEX IF NOT EXISTS idx_user_concept_stats_user ON user_concept_stats(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_concept_stats_concept ON user_concept_stats(concept_id);
+CREATE INDEX IF NOT EXISTS idx_user_concept_stats_proficiency ON user_concept_stats(user_id, proficiency_level);
+CREATE INDEX IF NOT EXISTS idx_user_concept_stats_next_review ON user_concept_stats(user_id, next_review_date);
+
+-- Learning patterns index
+CREATE INDEX IF NOT EXISTS idx_user_learning_patterns_user ON user_learning_patterns(user_id);
 
 -- =====================================================
 -- ROW LEVEL SECURITY (RLS)
@@ -531,6 +645,12 @@ ALTER TABLE daily_practice_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_practice_questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_progress ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payment_orders ENABLE ROW LEVEL SECURITY;
+
+-- Enable RLS for concept and learning pattern tables
+ALTER TABLE concepts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE question_concepts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_concept_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_learning_patterns ENABLE ROW LEVEL SECURITY;
 
 -- Users can only access their own data
 CREATE POLICY users_policy ON users FOR ALL USING (auth.uid() = id);
@@ -585,6 +705,14 @@ CREATE POLICY test_questions_read ON test_questions FOR SELECT USING (true);
 CREATE POLICY subscription_plans_read ON subscription_plans FOR SELECT USING (is_active = true);
 CREATE POLICY resources_read ON resources FOR SELECT USING (true);
 
+-- Public read access for concept content tables
+CREATE POLICY concepts_read ON concepts FOR SELECT USING (is_active = true);
+CREATE POLICY question_concepts_read ON question_concepts FOR SELECT USING (true);
+
+-- User-specific policies for concept stats and learning patterns
+CREATE POLICY user_concept_stats_policy ON user_concept_stats FOR ALL USING (auth.uid() = user_id);
+CREATE POLICY user_learning_patterns_policy ON user_learning_patterns FOR ALL USING (auth.uid() = user_id);
+
 -- Admin access policies for content management
 -- Helper function to avoid RLS recursion
 CREATE OR REPLACE FUNCTION get_my_role()
@@ -634,6 +762,14 @@ CREATE POLICY admin_test_questions_all ON test_questions FOR ALL USING (
 );
 
 CREATE POLICY admin_resources_all ON resources FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+
+CREATE POLICY admin_concepts_all ON concepts FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+
+CREATE POLICY admin_question_concepts_all ON question_concepts FOR ALL USING (
   (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
 );
 
