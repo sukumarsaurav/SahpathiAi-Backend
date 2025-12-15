@@ -2107,8 +2107,7 @@ router.get('/support/tickets', async (req, res) => {
             .from('support_tickets')
             .select(`
                 *,
-                user:users(id, email, full_name, avatar_url),
-                assigned:users!support_tickets_assigned_to_fkey(id, full_name)
+                user:users!support_tickets_user_id_fkey(id, email, full_name, avatar_url)
             `, { count: 'exact' })
             .order('created_at', { ascending: false });
 
@@ -2126,7 +2125,10 @@ router.get('/support/tickets', async (req, res) => {
 
         const { data, error, count } = await query;
 
-        if (error) throw error;
+        if (error) {
+            console.error('Query error:', error);
+            throw error;
+        }
 
         res.json({
             tickets: data || [],
@@ -2149,8 +2151,7 @@ router.get('/support/tickets/:id', async (req, res) => {
             .from('support_tickets')
             .select(`
                 *,
-                user:users(id, email, full_name, avatar_url),
-                assigned:users!support_tickets_assigned_to_fkey(id, full_name)
+                user:users!support_tickets_user_id_fkey(id, email, full_name, avatar_url)
             `)
             .eq('id', id)
             .single();
