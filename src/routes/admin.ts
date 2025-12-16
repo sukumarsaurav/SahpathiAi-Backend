@@ -2348,4 +2348,214 @@ router.get('/support/stats', async (req, res) => {
     }
 });
 
+// --- PROMO CODES ---
+
+// GET /api/admin/promo-codes - Get all promo codes with usage stats
+router.get('/promo-codes', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('promo_codes')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching promo codes:', error);
+        res.status(500).json({ error: 'Failed to fetch promo codes' });
+    }
+});
+
+// GET /api/admin/promo-codes/:id - Get single promo code with usage details
+router.get('/promo-codes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const { data: promoCode, error } = await supabase
+            .from('promo_codes')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (error || !promoCode) {
+            return res.status(404).json({ error: 'Promo code not found' });
+        }
+
+        // Get usage history
+        const { data: usages } = await supabase
+            .from('promo_code_usages')
+            .select(`
+                *,
+                user:users(id, email, full_name)
+            `)
+            .eq('promo_code_id', id)
+            .order('used_at', { ascending: false });
+
+        res.json({ ...promoCode, usages: usages || [] });
+    } catch (error) {
+        console.error('Error fetching promo code:', error);
+        res.status(500).json({ error: 'Failed to fetch promo code' });
+    }
+});
+
+// POST /api/admin/promo-codes - Create new promo code
+router.post('/promo-codes', async (req, res) => {
+    try {
+        const {
+            code,
+            description,
+            discount_type = 'percentage',
+            discount_value,
+            max_uses,
+            start_date,
+            end_date,
+            is_active = true,
+            applicable_plan_ids,
+            min_order_amount = 0
+        } = req.body;
+
+        // Validate required fields
+        if (!code || !discount_value || !start_date || !end_date) {
+            return res.status(400).json({
+                error: 'Code, discount_value, start_date, and end_date are required'
+            });
+        }
+
+        // Validate discount percentage
+        if (discount_type === 'percentage' && (discount_value <= 0 || discount_value > 100)) {
+            return res.status(400).json({
+                error: 'Discount percentage must be between 1 and 100'
+            });
+        }
+
+        // Check if code already exists
+        const { data: existing } = await supabase
+            .from('promo_codes')
+            .select('id')
+            .eq('code', code.toUpperCase())
+            .single();
+
+        if (existing) {
+            return res.status(400).json({ error: 'Promo code already exists' });
+        }
+
+        const { data, error } = await supabase
+            .from('promo_codes')
+            .insert({
+                code: code.toUpperCase(),
+                description,
+                discount_type,
+                discount_value,
+                max_uses: max_uses || null,
+                start_date,
+                end_date,
+                is_active,
+                applicable_plan_ids: applicable_plan_ids || null,
+                min_order_amount
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating promo code:', error);
+        res.status(500).json({ error: 'Failed to create promo code' });
+    }
+});
+
+// PUT /api/admin/promo-codes/:id - Update promo code
+router.put('/promo-codes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            code,
+            description,
+            discount_type,
+            discount_value,
+            max_uses,
+            start_date,
+            end_date,
+            is_active,
+            applicable_plan_ids,
+            min_order_amount
+        } = req.body;
+
+        const updateData: any = { updated_at: new Date().toISOString() };
+
+        if (code !== undefined) updateData.code = code.toUpperCase();
+        if (description !== undefined) updateData.description = description;
+        if (discount_type !== undefined) updateData.discount_type = discount_type;
+        if (discount_value !== undefined) updateData.discount_value = discount_value;
+        if (max_uses !== undefined) updateData.max_uses = max_uses || null;
+        if (start_date !== undefined) updateData.start_date = start_date;
+        if (end_date !== undefined) updateData.end_date = end_date;
+        if (is_active !== undefined) updateData.is_active = is_active;
+        if (applicable_plan_ids !== undefined) updateData.applicable_plan_ids = applicable_plan_ids || null;
+        if (min_order_amount !== undefined) updateData.min_order_amount = min_order_amount;
+
+        const { data, error } = await supabase
+            .from('promo_codes')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating promo code:', error);
+        res.status(500).json({ error: 'Failed to update promo code' });
+    }
+});
+
+// DELETE /api/admin/promo-codes/:id - Delete promo code
+router.delete('/promo-codes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('promo_codes')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting promo code:', error);
+        res.status(500).json({ error: 'Failed to delete promo code' });
+    }
+});
+
+// GET /api/admin/promo-codes/:id/usages - Get usage history for a promo code
+router.get('/promo-codes/:id/usages', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { page = 1, limit = 20 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        const { data, error, count } = await supabase
+            .from('promo_code_usages')
+            .select(`
+                *,
+                user:users(id, email, full_name),
+                payment_order:payment_orders(id, amount, original_amount, discount_amount)
+            `, { count: 'exact' })
+            .eq('promo_code_id', id)
+            .order('used_at', { ascending: false })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (error) throw error;
+
+        res.json({
+            usages: data || [],
+            total: count || 0,
+            page: Number(page),
+            totalPages: Math.ceil((count || 0) / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching promo code usages:', error);
+        res.status(500).json({ error: 'Failed to fetch promo code usages' });
+    }
+});
+
 export default router;

@@ -11,9 +11,9 @@ const router = Router();
  */
 router.post('/create-order', authenticate, async (req, res) => {
     try {
-        const { plan_id, billing_cycle = 'monthly' } = req.body;
+        const { plan_id, billing_cycle = 'monthly', promo_code } = req.body;
 
-        console.log('[Payment] Creating order for plan:', plan_id, 'billing:', billing_cycle);
+        console.log('[Payment] Creating order for plan:', plan_id, 'billing:', billing_cycle, 'promo:', promo_code);
 
         if (!plan_id) {
             return res.status(400).json({ error: 'Plan ID is required' });
@@ -42,11 +42,86 @@ router.post('/create-order', authenticate, async (req, res) => {
         console.log('[Payment] Plan found:', plan.name, 'Price:', plan.price_monthly);
 
         // Get price based on billing cycle
-        const amount = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
+        const originalAmount = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
+        let finalAmount = originalAmount;
+        let discountAmount = 0;
+        let promoCodeId: string | null = null;
+        let promoCodeData: any = null;
 
-        // If free plan, activate directly without payment
-        if (amount === 0) {
-            console.log('[Payment] Free plan detected, activating directly');
+        // Validate and apply promo code if provided
+        if (promo_code) {
+            const { data: promoCode, error: promoError } = await supabaseAdmin
+                .from('promo_codes')
+                .select('*')
+                .eq('code', promo_code.toUpperCase())
+                .eq('is_active', true)
+                .single();
+
+            if (promoError || !promoCode) {
+                return res.status(400).json({ error: 'Invalid promo code' });
+            }
+
+            // Validate promo code
+            const now = new Date();
+            const startDate = new Date(promoCode.start_date);
+            const endDate = new Date(promoCode.end_date);
+
+            if (now < startDate || now > endDate) {
+                return res.status(400).json({ error: 'Promo code is expired or not yet active' });
+            }
+
+            if (promoCode.max_uses !== null && promoCode.current_uses >= promoCode.max_uses) {
+                return res.status(400).json({ error: 'Promo code has reached maximum usage limit' });
+            }
+
+            // Check if user already used this promo
+            const { data: existingUsage } = await supabaseAdmin
+                .from('promo_code_usages')
+                .select('id')
+                .eq('promo_code_id', promoCode.id)
+                .eq('user_id', req.user!.id)
+                .single();
+
+            if (existingUsage) {
+                return res.status(400).json({ error: 'You have already used this promo code' });
+            }
+
+            // Check plan applicability
+            if (promoCode.applicable_plan_ids !== null) {
+                const applicablePlans = promoCode.applicable_plan_ids as string[];
+                if (!applicablePlans.includes(plan_id)) {
+                    return res.status(400).json({ error: 'Promo code is not applicable to this plan' });
+                }
+            }
+
+            // Check minimum order amount
+            if (promoCode.min_order_amount && originalAmount < promoCode.min_order_amount) {
+                return res.status(400).json({
+                    error: `Minimum order amount of ₹${promoCode.min_order_amount} required`
+                });
+            }
+
+            // Calculate discount
+            if (promoCode.discount_type === 'percentage') {
+                discountAmount = (originalAmount * promoCode.discount_value) / 100;
+            } else {
+                discountAmount = Math.min(promoCode.discount_value, originalAmount);
+            }
+
+            finalAmount = Math.max(0, originalAmount - discountAmount);
+            promoCodeId = promoCode.id;
+            promoCodeData = {
+                code: promoCode.code,
+                discount_type: promoCode.discount_type,
+                discount_value: promoCode.discount_value
+            };
+
+            console.log('[Payment] Promo code applied:', promoCode.code, 'Discount:', discountAmount);
+        }
+
+        // If free plan or discount makes it free, activate directly without payment
+        if (finalAmount === 0) {
+            console.log('[Payment] Free/fully discounted plan detected, activating directly');
 
             // Cancel existing subscription
             await supabaseAdmin
@@ -73,16 +148,31 @@ router.post('/create-order', authenticate, async (req, res) => {
                 throw subError;
             }
 
+            // Record promo code usage if used
+            if (promoCodeId) {
+                await supabaseAdmin
+                    .from('promo_code_usages')
+                    .insert({
+                        promo_code_id: promoCodeId,
+                        user_id: req.user!.id,
+                        discount_amount: discountAmount
+                    });
+
+                // Increment promo code usage count
+                await supabaseAdmin.rpc('increment_promo_uses', { promo_id: promoCodeId });
+            }
+
             console.log('[Payment] Free subscription activated');
             return res.json({
                 success: true,
                 is_free: true,
-                subscription
+                subscription,
+                promo_applied: promoCodeData
             });
         }
 
         // Create Razorpay order for paid plans
-        console.log('[Payment] Creating Razorpay order for amount:', amount);
+        console.log('[Payment] Creating Razorpay order for amount:', finalAmount);
 
         // Create a short receipt (max 40 chars for Razorpay)
         // Format: sub_<timestamp>_<last-8-chars-of-user-id>
@@ -91,20 +181,21 @@ router.post('/create-order', authenticate, async (req, res) => {
         const receipt = `sub_${timestamp}_${userIdShort}`;
 
         const options = {
-            amount: Math.round(amount * 100), // Razorpay expects amount in paise
+            amount: Math.round(finalAmount * 100), // Razorpay expects amount in paise
             currency: 'INR',
             receipt: receipt,
             notes: {
                 user_id: req.user!.id,
                 plan_id: plan_id,
-                billing_cycle: billing_cycle
+                billing_cycle: billing_cycle,
+                promo_code_id: promoCodeId || undefined
             }
         };
 
         console.log('[Payment] Razorpay order options:', JSON.stringify(options, null, 2));
 
         try {
-            const razorpayOrder = await razorpay.orders.create(options);
+            const razorpayOrder = await razorpay.orders.create(options as any) as { id: string; amount: number; currency: string };
             console.log('[Payment] Razorpay order created:', razorpayOrder.id);
 
             // Store order in database
@@ -115,7 +206,10 @@ router.post('/create-order', authenticate, async (req, res) => {
                     razorpay_order_id: razorpayOrder.id,
                     plan_id,
                     billing_cycle,
-                    amount,
+                    amount: finalAmount,
+                    original_amount: originalAmount,
+                    discount_amount: discountAmount,
+                    promo_code_id: promoCodeId,
                     currency: 'INR',
                     status: 'created'
                 })
@@ -136,8 +230,11 @@ router.post('/create-order', authenticate, async (req, res) => {
                 plan: {
                     id: plan.id,
                     name: plan.name,
-                    price: amount
-                }
+                    original_price: originalAmount,
+                    discount_amount: discountAmount,
+                    final_price: finalAmount
+                },
+                promo_applied: promoCodeData
             });
         } catch (razorpayError: any) {
             console.error('[Payment] Razorpay order creation failed:', razorpayError);
@@ -161,6 +258,7 @@ router.post('/create-order', authenticate, async (req, res) => {
         });
     }
 });
+
 
 /**
  * POST /api/payment/verify
@@ -259,6 +357,22 @@ router.post('/verify', authenticate, async (req, res) => {
             });
         }
 
+        // Record promo code usage if a promo code was used
+        if (paymentOrder.promo_code_id && paymentOrder.discount_amount > 0) {
+            // Record the usage
+            await supabaseAdmin
+                .from('promo_code_usages')
+                .insert({
+                    promo_code_id: paymentOrder.promo_code_id,
+                    user_id: req.user!.id,
+                    payment_order_id: paymentOrder.id,
+                    discount_amount: paymentOrder.discount_amount
+                });
+
+            // Increment promo code usage count
+            await supabaseAdmin.rpc('increment_promo_uses', { promo_id: paymentOrder.promo_code_id });
+        }
+
         res.json({
             success: true,
             subscription,
@@ -291,6 +405,117 @@ router.get('/order/:orderId', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Get order error:', error);
         res.status(500).json({ error: 'Failed to fetch order' });
+    }
+});
+
+/**
+ * POST /api/payment/validate-promo
+ * Validate a promo code and return discount information
+ */
+router.post('/validate-promo', authenticate, async (req, res) => {
+    try {
+        const { code, plan_id, billing_cycle = 'monthly' } = req.body;
+
+        if (!code || !plan_id) {
+            return res.status(400).json({ error: 'Code and plan_id are required' });
+        }
+
+        // Get promo code
+        const { data: promoCode, error: promoError } = await supabaseAdmin
+            .from('promo_codes')
+            .select('*')
+            .eq('code', code.toUpperCase())
+            .eq('is_active', true)
+            .single();
+
+        if (promoError || !promoCode) {
+            return res.status(404).json({ error: 'Invalid promo code' });
+        }
+
+        // Check if code is within valid date range
+        const now = new Date();
+        const startDate = new Date(promoCode.start_date);
+        const endDate = new Date(promoCode.end_date);
+
+        if (now < startDate) {
+            return res.status(400).json({ error: 'Promo code is not yet active' });
+        }
+
+        if (now > endDate) {
+            return res.status(400).json({ error: 'Promo code has expired' });
+        }
+
+        // Check usage limits
+        if (promoCode.max_uses !== null && promoCode.current_uses >= promoCode.max_uses) {
+            return res.status(400).json({ error: 'Promo code has reached maximum usage limit' });
+        }
+
+        // Check if user has already used this promo code
+        const { data: existingUsage } = await supabaseAdmin
+            .from('promo_code_usages')
+            .select('id')
+            .eq('promo_code_id', promoCode.id)
+            .eq('user_id', req.user!.id)
+            .single();
+
+        if (existingUsage) {
+            return res.status(400).json({ error: 'You have already used this promo code' });
+        }
+
+        // Check if promo code is applicable to this plan
+        if (promoCode.applicable_plan_ids !== null) {
+            const applicablePlans = promoCode.applicable_plan_ids as string[];
+            if (!applicablePlans.includes(plan_id)) {
+                return res.status(400).json({ error: 'Promo code is not applicable to this plan' });
+            }
+        }
+
+        // Get plan details to calculate discount
+        const { data: plan, error: planError } = await supabaseAdmin
+            .from('subscription_plans')
+            .select('*')
+            .eq('id', plan_id)
+            .single();
+
+        if (planError || !plan) {
+            return res.status(404).json({ error: 'Plan not found' });
+        }
+
+        const originalPrice = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
+
+        // Check minimum order amount
+        if (promoCode.min_order_amount && originalPrice < promoCode.min_order_amount) {
+            return res.status(400).json({
+                error: `Minimum order amount of ₹${promoCode.min_order_amount} required`
+            });
+        }
+
+        // Calculate discount
+        let discountAmount: number;
+        if (promoCode.discount_type === 'percentage') {
+            discountAmount = (originalPrice * promoCode.discount_value) / 100;
+        } else {
+            discountAmount = Math.min(promoCode.discount_value, originalPrice);
+        }
+
+        const finalPrice = Math.max(0, originalPrice - discountAmount);
+
+        res.json({
+            valid: true,
+            promo_code: {
+                id: promoCode.id,
+                code: promoCode.code,
+                discount_type: promoCode.discount_type,
+                discount_value: promoCode.discount_value,
+                description: promoCode.description
+            },
+            original_price: originalPrice,
+            discount_amount: discountAmount,
+            final_price: finalPrice
+        });
+    } catch (error) {
+        console.error('Validate promo code error:', error);
+        res.status(500).json({ error: 'Failed to validate promo code' });
     }
 });
 
