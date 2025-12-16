@@ -6,63 +6,65 @@ const router = Router();
 
 /**
  * GET /api/topics/subject/:subjectId
- * Get topics for a master subject, optionally filtered by exam
+ * Get topics for a master subject, optionally filtered by exam (cached 12h)
  * Used by Marathon mode
  */
 router.get('/subject/:subjectId', async (req, res) => {
     try {
         const { subjectId } = req.params;
         const { examId } = req.query;
+        const examIdStr = examId as string | undefined;
 
-        // Build query to fetch topics for the master subject
-        // Topics where subject_id matches AND (exam_id is NULL OR exam_id matches)
-        let query = supabaseAdmin
-            .from('topics')
-            .select('*')
-            .eq('subject_id', subjectId)
-            .eq('is_active', true)
-            .order('order_index');
+        const data = await cache.getOrSet(
+            cache.KEYS.topics(subjectId, examIdStr),
+            cache.TTL.TOPICS,
+            async () => {
+                // Build query to fetch topics for the master subject
+                let query = supabaseAdmin
+                    .from('topics')
+                    .select('*')
+                    .eq('subject_id', subjectId)
+                    .eq('is_active', true)
+                    .order('order_index');
 
-        // If examId is provided, filter to include only topics that are:
-        // - Common to all exams (exam_id is null), OR
-        // - Specific to this exam (exam_id matches)
-        if (examId) {
-            query = query.or(`exam_id.is.null,exam_id.eq.${examId}`);
-        }
+                // If examId is provided, filter to include only topics that are:
+                // - Common to all exams (exam_id is null), OR
+                // - Specific to this exam (exam_id matches)
+                if (examIdStr) {
+                    query = query.or(`exam_id.is.null,exam_id.eq.${examIdStr}`);
+                }
 
-        const { data: topics, error } = await query;
+                const { data: topics, error } = await query;
+                if (error) throw error;
 
-        if (error) throw error;
+                // Get actual question counts for each topic
+                if (topics && topics.length > 0) {
+                    const topicIds = topics.map(t => t.id);
 
-        // Get actual question counts for each topic
-        if (topics && topics.length > 0) {
-            const topicIds = topics.map(t => t.id);
+                    const { data: questionCounts, error: countError } = await supabaseAdmin
+                        .from('questions')
+                        .select('topic_id')
+                        .in('topic_id', topicIds)
+                        .eq('is_active', true);
 
-            // Count active questions per topic
-            const { data: questionCounts, error: countError } = await supabaseAdmin
-                .from('questions')
-                .select('topic_id')
-                .in('topic_id', topicIds)
-                .eq('is_active', true);
+                    if (!countError && questionCounts) {
+                        const countMap: Record<string, number> = {};
+                        questionCounts.forEach(q => {
+                            countMap[q.topic_id] = (countMap[q.topic_id] || 0) + 1;
+                        });
 
-            if (!countError && questionCounts) {
-                // Count questions per topic
-                const countMap: Record<string, number> = {};
-                questionCounts.forEach(q => {
-                    countMap[q.topic_id] = (countMap[q.topic_id] || 0) + 1;
-                });
+                        return topics.map(topic => ({
+                            ...topic,
+                            question_count: countMap[topic.id] || 0
+                        }));
+                    }
+                }
 
-                // Update topic objects with actual counts
-                const topicsWithCounts = topics.map(topic => ({
-                    ...topic,
-                    question_count: countMap[topic.id] || 0
-                }));
-
-                return res.json(topicsWithCounts);
+                return topics;
             }
-        }
+        );
 
-        res.json(topics);
+        res.json(data);
     } catch (error) {
         console.error('Get topics for subject error:', error);
         res.status(500).json({ error: 'Failed to fetch topics' });

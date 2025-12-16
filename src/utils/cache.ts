@@ -50,6 +50,12 @@ const TTL = {
     TOPIC_QUESTIONS: 30 * 60,    // 30 min - topic question list
     EXAM_TREE: 24 * 60 * 60,     // 24 hours - exam/subject/topic hierarchy
     USER_DASHBOARD: 5 * 60,      // 5 min - user stats
+    // Static data caching
+    EXAM_CATEGORIES: 24 * 60 * 60,   // 24 hours - exam categories
+    EXAMS: 24 * 60 * 60,             // 24 hours - exams list
+    EXAM_SUBJECTS: 24 * 60 * 60,     // 24 hours - subjects for an exam
+    TOPICS: 12 * 60 * 60,            // 12 hours - topics for a subject
+    SUBSCRIPTION_PLANS: 6 * 60 * 60, // 6 hours - subscription plans
 } as const;
 
 // Key prefixes
@@ -58,6 +64,13 @@ const KEYS = {
     topicQuestions: (topicId: string, langId?: string) => `t:${topicId}:q${langId ? `:${langId}` : ''}`,
     examTree: (examId: string) => `e:${examId}:tree`,
     userDashboard: (userId: string) => `u:${userId}:dash`,
+    // Static data keys
+    examCategories: () => 'ec:all',
+    exams: (categoryId?: string) => categoryId ? `ex:cat:${categoryId}` : 'ex:all',
+    examDetails: (examId: string) => `ex:${examId}`,
+    examSubjects: (examId: string) => `ex:${examId}:subj`,
+    topics: (subjectId: string, examId?: string) => `top:${subjectId}${examId ? `:ex:${examId}` : ''}`,
+    subscriptionPlans: () => 'sp:all',
 } as const;
 
 // =====================================================
@@ -181,6 +194,71 @@ export async function setUserDashboard(userId: string, data: any): Promise<void>
     }
 }
 
+// =====================================================
+// GENERIC CACHE HELPERS
+// =====================================================
+
+/**
+ * Generic get-or-set helper for caching
+ * Returns cached data if available, otherwise fetches and caches
+ */
+export async function getOrSet<T>(
+    key: string,
+    ttlSeconds: number,
+    fetchFn: () => Promise<T>
+): Promise<T> {
+    if (client) {
+        try {
+            const cached = await client.get(key);
+            if (cached) {
+                return JSON.parse(cached) as T;
+            }
+        } catch (err) {
+            console.error('Cache get error:', err);
+        }
+    }
+
+    // Fetch fresh data
+    const data = await fetchFn();
+
+    // Cache it
+    if (client && data) {
+        try {
+            await client.setEx(key, ttlSeconds, JSON.stringify(data));
+        } catch (err) {
+            console.error('Cache set error:', err);
+        }
+    }
+
+    return data;
+}
+
+/**
+ * Get cached value directly (or null)
+ */
+export async function get<T>(key: string): Promise<T | null> {
+    if (!client) return null;
+    try {
+        const cached = await client.get(key);
+        return cached ? JSON.parse(cached) as T : null;
+    } catch (err) {
+        console.error('Cache get error:', err);
+        return null;
+    }
+}
+
+/**
+ * Set cached value directly
+ */
+export async function set(key: string, ttlSeconds: number, data: any): Promise<void> {
+    if (!client) return;
+    try {
+        await client.setEx(key, ttlSeconds, JSON.stringify(data));
+    } catch (err) {
+        console.error('Cache set error:', err);
+    }
+}
+
 /**
  * Invalidate cache entries (use when data is updated)
  */
@@ -235,6 +313,10 @@ export const cache = {
     setExamTree,
     getUserDashboard,
     setUserDashboard,
+    // Generic helpers
+    getOrSet,
+    get,
+    set,
     invalidate,
     invalidateQuestion,
     isConnected,
@@ -244,3 +326,4 @@ export const cache = {
 };
 
 export default cache;
+

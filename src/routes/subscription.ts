@@ -1,22 +1,29 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { cache } from '../utils/cache';
 
 const router = Router();
 
 /**
  * GET /api/subscription/plans
- * Get available subscription plans
+ * Get available subscription plans (cached 6h)
  */
 router.get('/plans', async (req, res) => {
     try {
-        const { data, error } = await supabaseAdmin
-            .from('subscription_plans')
-            .select('*')
-            .eq('is_active', true)
-            .order('price_monthly');
-
-        if (error) throw error;
+        const data = await cache.getOrSet(
+            cache.KEYS.subscriptionPlans(),
+            cache.TTL.SUBSCRIPTION_PLANS,
+            async () => {
+                const { data, error } = await supabaseAdmin
+                    .from('subscription_plans')
+                    .select('*')
+                    .eq('is_active', true)
+                    .order('price_monthly');
+                if (error) throw error;
+                return data;
+            }
+        );
 
         res.json(data);
     } catch (error) {
