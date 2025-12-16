@@ -1,9 +1,37 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { apiRateLimiter } from '../middleware/rateLimiter';
 import { updateConceptStatsRealtime } from '../services/personalization';
+import { z } from 'zod';
+
+// Constants for mastery and spaced repetition logic
+const MASTERY_STREAK_THRESHOLD = 3; // consecutive correct answers needed for mastery
+const REVIEW_INTERVAL_DAYS = 7; // days until next review after mastery
+
+// ========== Validation Schemas ==========
+
+/** Schema for POST /:id/retry body */
+const retrySchema = z.object({
+    is_correct: z.boolean(),
+});
+
+/** Schema for POST /:id/practice body */
+const practiceSchema = z.object({
+    is_correct: z.boolean(),
+    time_taken: z.number().positive().optional(),
+});
+
+/** Schema for validating UUID route params */
+const uuidParamSchema = z.string().uuid();
+
+/** Schema for validating level param (1, 2, or 3+) */
+const levelParamSchema = z.coerce.number().int().min(1).max(999);
 
 const router = Router();
+
+// Apply rate limiting to all routes in this router
+router.use(apiRateLimiter);
 
 /**
  * GET /api/mistakes
@@ -401,8 +429,19 @@ router.get('/subject/:subjectId', authenticate, async (req, res) => {
  */
 router.post('/:id/retry', authenticate, async (req, res) => {
     try {
-        const { id } = req.params;
-        const { is_correct } = req.body;
+        // Validate route param
+        const idResult = uuidParamSchema.safeParse(req.params.id);
+        if (!idResult.success) {
+            return res.status(400).json({ error: 'Invalid mistake ID format', details: idResult.error.format() });
+        }
+        const id = idResult.data;
+
+        // Validate request body
+        const bodyResult = retrySchema.safeParse(req.body);
+        if (!bodyResult.success) {
+            return res.status(400).json({ error: 'Invalid request body', details: bodyResult.error.format() });
+        }
+        const { is_correct } = bodyResult.data;
 
         const { data: existing } = await supabaseAdmin
             .from('user_mistakes')
@@ -674,8 +713,19 @@ router.get('/by-concept', authenticate, async (req, res) => {
  */
 router.post('/:id/practice', authenticate, async (req, res) => {
     try {
-        const { id } = req.params;
-        const { is_correct, time_taken } = req.body;
+        // Validate route param
+        const idResult = uuidParamSchema.safeParse(req.params.id);
+        if (!idResult.success) {
+            return res.status(400).json({ error: 'Invalid mistake ID format', details: idResult.error.format() });
+        }
+        const id = idResult.data;
+
+        // Validate request body
+        const bodyResult = practiceSchema.safeParse(req.body);
+        if (!bodyResult.success) {
+            return res.status(400).json({ error: 'Invalid request body', details: bodyResult.error.format() });
+        }
+        const { is_correct, time_taken } = bodyResult.data;
         const userId = req.user!.id;
 
         // Get current mistake state
@@ -701,8 +751,8 @@ router.post('/:id/practice', authenticate, async (req, res) => {
 
         const retryCount = (current.retry_count || 0) + 1;
 
-        // Mastery: 3 consecutive correct answers
-        const isMastered = consecutiveCorrect >= 3;
+        // Mastery: N consecutive correct answers
+        const isMastered = consecutiveCorrect >= MASTERY_STREAK_THRESHOLD;
         const masteryStatus = isMastered
             ? 'mastered'
             : consecutiveCorrect > 0
@@ -713,16 +763,17 @@ router.post('/:id/practice', authenticate, async (req, res) => {
         let nextReviewDate: string | null = null;
         if (isMastered) {
             const reviewDate = new Date();
-            reviewDate.setDate(reviewDate.getDate() + 7); // Review in 1 week
+            reviewDate.setDate(reviewDate.getDate() + REVIEW_INTERVAL_DAYS); // Spaced repetition
             nextReviewDate = reviewDate.toISOString().split('T')[0];
         }
 
         // Calculate average time
         const prevAvg = current.time_taken_avg || 0;
         const prevCount = current.total_correct || 0;
-        const newAvg = prevCount > 0
-            ? Math.round((prevAvg * prevCount + time_taken) / (prevCount + 1))
-            : time_taken;
+        const timeTakenValue = time_taken ?? 0;
+        const newAvg = prevCount > 0 && timeTakenValue > 0
+            ? Math.round((prevAvg * prevCount + timeTakenValue) / (prevCount + 1))
+            : timeTakenValue || prevAvg;
 
         // Update mistake - DOES NOT set is_resolved
         const { data: updated, error: updateError } = await supabaseAdmin
@@ -735,7 +786,7 @@ router.post('/:id/practice', authenticate, async (req, res) => {
                 next_review_date: nextReviewDate,
                 last_attempted: new Date().toISOString(),
                 last_correct_at: is_correct ? new Date().toISOString() : current.last_correct_at,
-                time_taken_avg: time_taken ? newAvg : current.time_taken_avg,
+                time_taken_avg: timeTakenValue > 0 ? newAvg : current.time_taken_avg,
                 difficulty: current.difficulty || (current.question as any)?.difficulty
             })
             .eq('id', id)
