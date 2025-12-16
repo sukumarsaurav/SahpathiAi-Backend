@@ -522,43 +522,48 @@ router.get('/sets', authenticate, async (req, res) => {
             recommendations.push(`${sets[2].mistakes.length} chronic issues need your attention`);
         }
 
-        // Get concept-based recommendation
-        const questionIds = mistakes.map(m => m.question_id);
-        const { data: conceptData } = await supabaseAdmin
-            .from('question_concepts')
-            .select('concept_id')
-            .in('question_id', questionIds);
+        // Get concept-based recommendation (wrapped in try-catch to not fail entire endpoint)
+        try {
+            const questionIds = mistakes.map(m => m.question_id);
+            const { data: conceptData } = await supabaseAdmin
+                .from('question_concepts')
+                .select('concept_id')
+                .in('question_id', questionIds);
 
-        if (conceptData && conceptData.length > 0) {
-            // Count mistakes per concept
-            const conceptCounts = new Map<string, number>();
-            for (const qc of conceptData) {
-                conceptCounts.set(qc.concept_id, (conceptCounts.get(qc.concept_id) || 0) + 1);
-            }
+            if (conceptData && conceptData.length > 0) {
+                // Count mistakes per concept
+                const conceptCounts = new Map<string, number>();
+                for (const qc of conceptData) {
+                    conceptCounts.set(qc.concept_id, (conceptCounts.get(qc.concept_id) || 0) + 1);
+                }
 
-            // Find most problematic concept
-            let maxConceptId = '';
-            let maxCount = 0;
-            for (const [id, count] of conceptCounts) {
-                if (count > maxCount) {
-                    maxConceptId = id;
-                    maxCount = count;
+                // Find most problematic concept
+                let maxConceptId = '';
+                let maxCount = 0;
+                for (const [id, count] of conceptCounts) {
+                    if (count > maxCount) {
+                        maxConceptId = id;
+                        maxCount = count;
+                    }
+                }
+
+                if (maxCount >= 3 && maxConceptId) {
+                    const { data: concept } = await supabaseAdmin
+                        .from('concepts')
+                        .select('name')
+                        .eq('id', maxConceptId)
+                        .maybeSingle(); // Use maybeSingle to avoid error if not found
+
+                    if (concept) {
+                        recommendations.push(
+                            `${maxCount} mistakes in '${concept.name}' - review this concept first`
+                        );
+                    }
                 }
             }
-
-            if (maxCount >= 3) {
-                const { data: concept } = await supabaseAdmin
-                    .from('concepts')
-                    .select('name')
-                    .eq('id', maxConceptId)
-                    .single();
-
-                if (concept) {
-                    recommendations.push(
-                        `${maxCount} mistakes in '${concept.name}' - review this concept first`
-                    );
-                }
-            }
+        } catch (conceptError) {
+            console.log('Concept recommendation skipped:', conceptError);
+            // Continue without concept recommendations
         }
 
         res.json({
@@ -578,7 +583,7 @@ router.get('/sets', authenticate, async (req, res) => {
         });
     } catch (error) {
         console.error('Get mistake sets error:', error);
-        res.status(500).json({ error: 'Failed to fetch mistake sets' });
+        res.status(500).json({ error: 'Failed to fetch mistake sets', details: String(error) });
     }
 });
 
