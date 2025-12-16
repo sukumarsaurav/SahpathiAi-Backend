@@ -392,7 +392,7 @@ router.delete('/topics/:id', async (req, res) => {
 router.post('/topics/:id/suggest-concepts', async (req, res) => {
     try {
         const { id } = req.params;
-        const { count = 10 } = req.body;
+        const { count = 10, instruction } = req.body;
 
         // Get topic with subject info
         const { data: topic, error: topicError } = await supabase
@@ -419,13 +419,54 @@ router.post('/topics/:id/suggest-concepts', async (req, res) => {
             topicName: topic.name,
             subjectName: (topic.subjects as any)?.name || 'Unknown Subject',
             existingConcepts: existingConcepts || [],
-            count
+            count,
+            customInstruction: instruction
         });
 
         res.json({ suggestions });
     } catch (error: any) {
         console.error('Error suggesting concepts:', error);
         res.status(500).json({ error: error.message || 'Failed to generate concept suggestions' });
+    }
+});
+
+// POST /api/admin/tests/suggest-details
+router.post('/tests/suggest-details', async (req, res) => {
+    try {
+        const { exam_id, subject_id, topic_ids, instruction } = req.body;
+
+        if (!topic_ids || !Array.isArray(topic_ids) || topic_ids.length === 0) {
+            return res.status(400).json({ error: 'At least one topic is required' });
+        }
+
+        // Fetch names
+        let examName = 'General';
+        if (exam_id) {
+            const { data: exam } = await supabase.from('exams').select('name').eq('id', exam_id).single();
+            if (exam) examName = exam.name;
+        }
+
+        let subjectName = 'General';
+        if (subject_id) {
+            const { data: subject } = await supabase.from('subjects').select('name').eq('id', subject_id).single();
+            if (subject) subjectName = subject.name;
+        }
+
+        const { data: topics } = await supabase.from('topics').select('name').in('id', topic_ids);
+        const topicNames = topics?.map((t: any) => t.name) || [];
+
+        const { suggestTestDetails } = await import('../services/openai.js');
+        const result = await suggestTestDetails({
+            examName,
+            subjectName,
+            topicNames,
+            customInstruction: instruction
+        });
+
+        res.json(result);
+    } catch (error: any) {
+        console.error('Error suggesting test details:', error);
+        res.status(500).json({ error: 'Failed to suggest test details' });
     }
 });
 

@@ -262,8 +262,9 @@ export async function suggestNewConcepts(params: {
     subjectName: string;
     existingConcepts: { name: string; description?: string }[];
     count?: number;
+    customInstruction?: string;
 }): Promise<{ name: string; description: string; difficulty_level: number }[]> {
-    const { topicName, subjectName, existingConcepts, count = 10 } = params;
+    const { topicName, subjectName, existingConcepts, count = 10, customInstruction } = params;
 
     const existingList = existingConcepts.length > 0
         ? existingConcepts.map(c => `- ${c.name}${c.description ? `: ${c.description}` : ''}`).join('\n')
@@ -285,6 +286,8 @@ Suggest concepts that:
 2. Are commonly tested in competitive exams
 3. Fill gaps in the existing concept coverage
 4. Progress from basic to advanced understanding
+
+${customInstruction ? `SPECIAL INSTRUCTION FROM USER:\n${customInstruction}\n\nEnsure suggestions strictly follow the user's special instruction above.` : ''}
 
 Respond with JSON:
 {
@@ -362,6 +365,50 @@ confidence is 0-1, where 1 means definitely tests this concept.`;
             confidence: s.confidence
         }))
         .filter((s: any) => s.concept_id);
+}
+
+/**
+ * Suggest Test Details (Title & Description) based on topics
+ */
+export async function suggestTestDetails(params: {
+    examName: string;
+    subjectName: string;
+    topicNames: string[];
+    customInstruction?: string;
+}): Promise<{ title: string; description: string }> {
+    const { examName, subjectName, topicNames, customInstruction } = params;
+
+    const topicList = topicNames.map(t => `- ${t}`).join('\n');
+
+    const systemPrompt = `You are an expert exam coordinator. Your task is to generate a professional and descriptive title and description for a new test based on the selected syllabus.`;
+
+    const userPrompt = `Generate a Title and Description for a test with the following configuration:
+
+EXAM: ${examName}
+SUBJECT: ${subjectName}
+TOPICS INCLUDED:
+${topicList}
+
+${customInstruction ? `USER INSTRUCTION: ${customInstruction}` : ''}
+
+The title should be professional (e.g., "Advanced Algebra Assessment", "Mock Test: Thermodynamics").
+The description should briefly mention the scope and what students should expect.
+
+Respond with JSON:
+{
+  "title": "Test Title",
+  "description": "Test Description..."
+}`;
+
+    const response = await callOpenAI(
+        [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        'json'
+    );
+
+    return JSON.parse(response);
 }
 
 /**
