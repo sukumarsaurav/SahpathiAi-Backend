@@ -383,5 +383,46 @@ router.post('/forgot-password', async (req, res) => {
     }
 });
 
+/**
+ * GET /api/user/check-username/:username
+ * Check if a username is available
+ */
+router.get('/check-username/:username', authenticate, async (req, res) => {
+    try {
+        const { username } = req.params;
+        const userId = req.user!.id;
+
+        if (!username || username.length < 3) {
+            return res.json({ available: false, message: 'Username must be at least 3 characters' });
+        }
+
+        if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+            return res.json({ available: false, message: 'Username can only contain letters, numbers, and underscores' });
+        }
+
+        // Check if username is taken by another user (exclude current user)
+        const { data, error } = await supabaseAdmin
+            .from('users')
+            .select('id')
+            .eq('username', username)
+            .neq('id', userId)
+            .single();
+
+        if (error && error.code !== 'PGRST116') {
+            throw error;
+        }
+
+        // If data exists, username is taken
+        if (data) {
+            return res.json({ available: false, message: 'Username is already taken' });
+        }
+
+        res.json({ available: true, message: 'Username is available' });
+    } catch (error) {
+        console.error('Check username error:', error);
+        res.status(500).json({ error: 'Failed to check username' });
+    }
+});
+
 export default router;
 
