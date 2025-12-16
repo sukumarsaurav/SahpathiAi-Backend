@@ -1,5 +1,7 @@
--- Sahpathi.ai Database Schema
--- Run this SQL in Supabase SQL Editor to create all tables
+-- Sahpathi.ai Database Schema (Consolidated)
+-- This file contains the complete database structure including all migrations.
+-- Run this SQL in Supabase SQL Editor to create all tables from scratch.
+-- Last updated: 2024-12-16
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -87,6 +89,10 @@ CREATE TABLE IF NOT EXISTS questions (
   difficulty VARCHAR(20) DEFAULT 'medium' CHECK (difficulty IN ('easy', 'medium', 'hard')),
   correct_answer_index INT NOT NULL CHECK (correct_answer_index >= 0 AND correct_answer_index <= 3),
   is_active BOOLEAN DEFAULT true,
+  -- AI Question Generation fields
+  is_ai_generated BOOLEAN DEFAULT false,
+  is_verified BOOLEAN DEFAULT true, -- AI questions start unverified, manual questions are verified
+  content_hash VARCHAR(64), -- SHA-256 for duplicate detection
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -261,6 +267,28 @@ CREATE TABLE IF NOT EXISTS user_subscriptions (
   cancelled_at TIMESTAMPTZ
 );
 
+-- =====================================================
+-- PROMO CODE TABLES
+-- =====================================================
+
+-- Promo Codes
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  code VARCHAR(50) NOT NULL UNIQUE,
+  description TEXT,
+  discount_type VARCHAR(20) DEFAULT 'percentage' CHECK (discount_type IN ('percentage', 'fixed')),
+  discount_value DECIMAL(10, 2) NOT NULL CHECK (discount_value > 0),
+  max_uses INT, -- NULL = unlimited
+  current_uses INT DEFAULT 0,
+  start_date TIMESTAMPTZ NOT NULL,
+  end_date TIMESTAMPTZ NOT NULL,
+  is_active BOOLEAN DEFAULT true,
+  applicable_plan_ids JSONB, -- NULL = all plans, or array of plan IDs
+  min_order_amount DECIMAL(10, 2) DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Payment Orders (tracks Razorpay payment attempts)
 CREATE TABLE IF NOT EXISTS payment_orders (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -269,12 +297,26 @@ CREATE TABLE IF NOT EXISTS payment_orders (
   plan_id UUID REFERENCES subscription_plans(id),
   billing_cycle VARCHAR(20) CHECK (billing_cycle IN ('monthly', 'yearly')),
   amount DECIMAL(10, 2) NOT NULL,
+  original_amount DECIMAL(10, 2),
+  discount_amount DECIMAL(10, 2) DEFAULT 0,
+  promo_code_id UUID REFERENCES promo_codes(id),
   currency VARCHAR(10) DEFAULT 'INR',
   status VARCHAR(20) DEFAULT 'created' CHECK (status IN ('created', 'paid', 'failed', 'expired')),
   razorpay_payment_id VARCHAR(100),
   razorpay_signature VARCHAR(255),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   paid_at TIMESTAMPTZ
+);
+
+-- Promo Code Usage tracking
+CREATE TABLE IF NOT EXISTS promo_code_usages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  promo_code_id UUID REFERENCES promo_codes(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  payment_order_id UUID REFERENCES payment_orders(id) ON DELETE SET NULL,
+  discount_amount DECIMAL(10, 2) NOT NULL,
+  used_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(promo_code_id, user_id) -- Prevent same user using same code twice
 );
 
 -- =====================================================
@@ -381,7 +423,7 @@ CREATE TABLE IF NOT EXISTS saved_questions (
   UNIQUE(user_id, question_id)
 );
 
--- User Mistakes (NOT from Marathon mode)
+-- User Mistakes (NOT from Marathon mode) - Enhanced with mastery tracking
 CREATE TABLE IF NOT EXISTS user_mistakes (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -389,6 +431,14 @@ CREATE TABLE IF NOT EXISTS user_mistakes (
   selected_option INT,
   retry_count INT DEFAULT 0,
   is_resolved BOOLEAN DEFAULT false,
+  -- Mastery tracking fields
+  consecutive_correct INT DEFAULT 0,
+  total_correct INT DEFAULT 0,
+  mastery_status TEXT DEFAULT 'not_started' CHECK (mastery_status IN ('not_started', 'practicing', 'mastered')),
+  next_review_date DATE,
+  difficulty TEXT,
+  last_correct_at TIMESTAMPTZ,
+  time_taken_avg INT DEFAULT 0,
   last_attempted TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(user_id, question_id)
 );
@@ -584,14 +634,64 @@ CREATE TABLE IF NOT EXISTS user_learning_patterns (
 );
 
 -- =====================================================
+-- SUPPORT SYSTEM TABLES
+-- =====================================================
+
+-- Support Tickets
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  ticket_number VARCHAR(20) UNIQUE NOT NULL,
+  issue_type VARCHAR(50) NOT NULL,
+  subject VARCHAR(255) NOT NULL,
+  description TEXT,
+  status VARCHAR(20) DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved', 'closed')),
+  priority VARCHAR(20) DEFAULT 'normal' CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+  assigned_to UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ
+);
+
+-- Support Messages (Chat-like interaction)
+CREATE TABLE IF NOT EXISTS support_messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ticket_id UUID REFERENCES support_tickets(id) ON DELETE CASCADE,
+  sender_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  message TEXT NOT NULL,
+  is_from_admin BOOLEAN DEFAULT false,
+  is_read BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
+-- ADMIN SETTINGS TABLE
+-- =====================================================
+
+-- Admin Settings (API keys, configuration)
+CREATE TABLE IF NOT EXISTS admin_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  setting_key VARCHAR(100) UNIQUE NOT NULL,
+  setting_value TEXT,
+  is_encrypted BOOLEAN DEFAULT false,
+  description TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_by UUID REFERENCES users(id)
+);
+
+-- =====================================================
 -- INDEXES FOR PERFORMANCE
 -- =====================================================
 
 -- Content tables indexes
 CREATE INDEX IF NOT EXISTS idx_exams_category ON exams(category_id);
 CREATE INDEX IF NOT EXISTS idx_exam_subjects_exam ON exam_subjects(exam_id);
+CREATE INDEX IF NOT EXISTS idx_exam_subjects_subject ON exam_subjects(subject_id);
 CREATE INDEX IF NOT EXISTS idx_topics_subject ON topics(subject_id);
+CREATE INDEX IF NOT EXISTS idx_topics_exam ON topics(exam_id);
 CREATE INDEX IF NOT EXISTS idx_questions_topic ON questions(topic_id);
+CREATE INDEX IF NOT EXISTS idx_questions_ai_status ON questions(is_ai_generated, is_verified);
+CREATE INDEX IF NOT EXISTS idx_questions_content_hash ON questions(content_hash);
 CREATE INDEX IF NOT EXISTS idx_question_translations_question ON question_translations(question_id);
 CREATE INDEX IF NOT EXISTS idx_question_exam_history_question ON question_exam_history(question_id);
 
@@ -605,6 +705,9 @@ CREATE INDEX IF NOT EXISTS idx_user_answers_question ON user_answers(question_id
 -- User interaction indexes
 CREATE INDEX IF NOT EXISTS idx_saved_questions_user ON saved_questions(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_mistakes_user ON user_mistakes(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_mistakes_mastery ON user_mistakes(user_id, mastery_status);
+CREATE INDEX IF NOT EXISTS idx_user_mistakes_retry_level ON user_mistakes(user_id, retry_count);
+CREATE INDEX IF NOT EXISTS idx_user_mistakes_review_date ON user_mistakes(user_id, next_review_date) WHERE next_review_date IS NOT NULL;
 
 -- Custom test indexes
 CREATE INDEX IF NOT EXISTS idx_custom_tests_user ON custom_tests(user_id);
@@ -628,6 +731,12 @@ CREATE INDEX IF NOT EXISTS idx_wallet_transactions_wallet ON wallet_transactions
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_razorpay_id ON payment_orders(razorpay_order_id);
 
+-- Promo code indexes
+CREATE INDEX IF NOT EXISTS idx_promo_codes_code ON promo_codes(code);
+CREATE INDEX IF NOT EXISTS idx_promo_codes_active ON promo_codes(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_promo_code_usages_user ON promo_code_usages(user_id);
+CREATE INDEX IF NOT EXISTS idx_promo_code_usages_promo ON promo_code_usages(promo_code_id);
+
 -- Concept indexes
 CREATE INDEX IF NOT EXISTS idx_concepts_topic ON concepts(topic_id);
 CREATE INDEX IF NOT EXISTS idx_question_concepts_question ON question_concepts(question_id);
@@ -642,6 +751,14 @@ CREATE INDEX IF NOT EXISTS idx_user_concept_stats_next_review ON user_concept_st
 
 -- Learning patterns index
 CREATE INDEX IF NOT EXISTS idx_user_learning_patterns_user ON user_learning_patterns(user_id);
+
+-- Support system indexes
+CREATE INDEX IF NOT EXISTS idx_support_tickets_user ON support_tickets(user_id);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_number ON support_tickets(ticket_number);
+CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON support_messages(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_support_messages_created ON support_messages(ticket_id, created_at);
 
 -- =====================================================
 -- PARTIAL INDEXES (Status-based queries optimization)
@@ -663,7 +780,9 @@ WHERE status = 'active';
 -- ROW LEVEL SECURITY (RLS)
 -- =====================================================
 
--- Enable RLS on all tables
+-- Enable RLS on ALL tables
+
+-- User tables
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_stats ENABLE ROW LEVEL SECURITY;
@@ -687,13 +806,43 @@ ALTER TABLE daily_practice_questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_progress ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payment_orders ENABLE ROW LEVEL SECURITY;
 
--- Enable RLS for concept and learning pattern tables
+-- Content tables (PUBLIC READ)
+ALTER TABLE exam_categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE exams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE languages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subjects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE exam_subjects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE topics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE question_translations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE question_exam_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE test_categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE test_questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscription_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+
+-- Concept and learning tables
 ALTER TABLE concepts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE question_concepts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_concept_stats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_learning_patterns ENABLE ROW LEVEL SECURITY;
 
--- Users can only access their own data
+-- Support tables
+ALTER TABLE support_tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE support_messages ENABLE ROW LEVEL SECURITY;
+
+-- Promo code tables
+ALTER TABLE promo_codes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE promo_code_usages ENABLE ROW LEVEL SECURITY;
+
+-- Admin settings
+ALTER TABLE admin_settings ENABLE ROW LEVEL SECURITY;
+
+-- =====================================================
+-- RLS POLICIES - USER DATA (Users can only access their own data)
+-- =====================================================
+
 CREATE POLICY users_policy ON users FOR ALL USING (auth.uid() = id);
 CREATE POLICY user_preferences_policy ON user_preferences FOR ALL USING (auth.uid() = user_id);
 CREATE POLICY user_stats_policy ON user_stats FOR ALL USING (auth.uid() = user_id);
@@ -731,9 +880,17 @@ CREATE POLICY daily_questions_policy ON daily_practice_questions FOR ALL USING (
 CREATE POLICY daily_progress_policy ON daily_progress FOR ALL USING (auth.uid() = user_id);
 CREATE POLICY payment_orders_policy ON payment_orders FOR ALL USING (auth.uid() = user_id);
 
--- Public read access for content tables
+-- User-specific policies for concept stats and learning patterns
+CREATE POLICY user_concept_stats_policy ON user_concept_stats FOR ALL USING (auth.uid() = user_id);
+CREATE POLICY user_learning_patterns_policy ON user_learning_patterns FOR ALL USING (auth.uid() = user_id);
+
+-- =====================================================
+-- RLS POLICIES - PUBLIC READ ACCESS (Content tables)
+-- =====================================================
+
 CREATE POLICY exam_categories_read ON exam_categories FOR SELECT USING (true);
 CREATE POLICY exams_read ON exams FOR SELECT USING (is_active = true);
+CREATE POLICY subjects_read ON subjects FOR SELECT USING (is_active = true);
 CREATE POLICY exam_subjects_read ON exam_subjects FOR SELECT USING (is_active = true);
 CREATE POLICY topics_read ON topics FOR SELECT USING (is_active = true);
 CREATE POLICY languages_read ON languages FOR SELECT USING (is_active = true);
@@ -750,12 +907,31 @@ CREATE POLICY resources_read ON resources FOR SELECT USING (true);
 CREATE POLICY concepts_read ON concepts FOR SELECT USING (is_active = true);
 CREATE POLICY question_concepts_read ON question_concepts FOR SELECT USING (true);
 
--- User-specific policies for concept stats and learning patterns
-CREATE POLICY user_concept_stats_policy ON user_concept_stats FOR ALL USING (auth.uid() = user_id);
-CREATE POLICY user_learning_patterns_policy ON user_learning_patterns FOR ALL USING (auth.uid() = user_id);
+-- Public read access for active promo codes (for validation)
+CREATE POLICY promo_codes_read ON promo_codes FOR SELECT USING (is_active = true);
 
--- Admin access policies for content management
--- Helper function to avoid RLS recursion
+-- Users can only see their own promo code usages
+CREATE POLICY promo_code_usages_policy ON promo_code_usages FOR ALL USING (auth.uid() = user_id);
+
+-- =====================================================
+-- RLS POLICIES - SUPPORT SYSTEM
+-- =====================================================
+
+-- Users can view and create their own tickets
+CREATE POLICY support_tickets_user_policy ON support_tickets 
+  FOR ALL USING (auth.uid() = user_id);
+
+-- Users can view and create messages on their own tickets
+CREATE POLICY support_messages_user_policy ON support_messages 
+  FOR ALL USING (
+    ticket_id IN (SELECT id FROM support_tickets WHERE user_id = auth.uid())
+  );
+
+-- =====================================================
+-- RLS HELPER FUNCTION (Avoid recursion)
+-- =====================================================
+
+-- Secure function to fetch the current user's role without triggering RLS
 CREATE OR REPLACE FUNCTION get_my_role()
 RETURNS text
 LANGUAGE sql
@@ -766,10 +942,16 @@ AS $$
   SELECT role FROM users WHERE id = auth.uid();
 $$;
 
+-- =====================================================
+-- RLS POLICIES - ADMIN ACCESS
+-- =====================================================
+
+-- Users table admin access (using secure function to avoid recursion)
 CREATE POLICY admin_all_policy ON users FOR ALL USING (
   get_my_role() IN ('admin', 'content_manager')
 );
 
+-- Content tables admin access
 CREATE POLICY admin_exams_all ON exams FOR ALL USING (
   (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
 );
@@ -814,8 +996,34 @@ CREATE POLICY admin_question_concepts_all ON question_concepts FOR ALL USING (
   (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
 );
 
+-- Support system admin access
+CREATE POLICY support_tickets_admin_policy ON support_tickets 
+  FOR ALL USING (
+    (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+  );
+
+CREATE POLICY support_messages_admin_policy ON support_messages 
+  FOR ALL USING (
+    (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+  );
+
+-- Promo codes admin access
+CREATE POLICY promo_codes_admin_all ON promo_codes FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+
+CREATE POLICY promo_code_usages_admin ON promo_code_usages FOR SELECT USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+
+-- Admin settings policy (only admins)
+CREATE POLICY admin_settings_policy ON admin_settings 
+FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) = 'admin'
+);
+
 -- =====================================================
--- TRIGGERS
+-- HELPER FUNCTIONS
 -- =====================================================
 
 -- Function to handle new user signup
@@ -843,3 +1051,59 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Generate Support Ticket Number
+CREATE OR REPLACE FUNCTION generate_ticket_number()
+RETURNS TEXT AS $$
+DECLARE
+  ticket_num TEXT;
+  counter INT;
+BEGIN
+  -- Get count of tickets today
+  SELECT COUNT(*) + 1 INTO counter 
+  FROM support_tickets 
+  WHERE DATE(created_at) = CURRENT_DATE;
+  
+  -- Format: TKT-YYYYMMDD-XXXX
+  ticket_num := 'TKT-' || TO_CHAR(NOW(), 'YYYYMMDD') || '-' || LPAD(counter::TEXT, 4, '0');
+  
+  RETURN ticket_num;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Generate Question Content Hash (for AI duplicate detection)
+CREATE OR REPLACE FUNCTION generate_question_hash(question_text TEXT)
+RETURNS VARCHAR(64)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Normalize: lowercase, trim whitespace, remove extra spaces
+  RETURN encode(
+    sha256(
+      regexp_replace(
+        lower(trim(question_text)), 
+        '\s+', ' ', 'g'
+      )::bytea
+    ), 
+    'hex'
+  );
+END;
+$$;
+
+-- Increment Promo Code Usage Count
+CREATE OR REPLACE FUNCTION increment_promo_uses(promo_id UUID)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  UPDATE promo_codes
+  SET current_uses = current_uses + 1,
+      updated_at = NOW()
+  WHERE id = promo_id;
+END;
+$$;
+
+-- =====================================================
+-- END OF SCHEMA
+-- =====================================================

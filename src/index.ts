@@ -54,6 +54,37 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Cache version endpoint for client cache invalidation
+import { supabaseAdmin } from './db/supabase';
+app.get('/api/cache-version', async (req, res) => {
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('cache_versions')
+            .select('*')
+            .single();
+
+        if (error) {
+            // Return default version if table doesn't exist yet
+            return res.json({
+                version: '1.0',
+                exam_hierarchy_version: '1.0',
+                questions_version: '1.0',
+                updated_at: new Date().toISOString()
+            });
+        }
+
+        res.json({
+            version: `${data.exam_hierarchy_version}.${data.questions_version}`,
+            exam_hierarchy_version: data.exam_hierarchy_version,
+            questions_version: data.questions_version,
+            updated_at: data.updated_at
+        });
+    } catch (err) {
+        console.error('Cache version error:', err);
+        res.json({ version: '1.0', updated_at: new Date().toISOString() });
+    }
+});
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/languages', languageRoutes);
