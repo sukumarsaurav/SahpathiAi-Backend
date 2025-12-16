@@ -1771,6 +1771,33 @@ router.get('/analytics/subscription-stats', async (req, res) => {
         // Monthly recurring revenue estimation (last 30 days income)
         const last30DaysIncome = Object.values(incomeTrend).reduce((sum, val) => sum + val, 0);
 
+        // Recent subscriptions (last 10)
+        const { data: recentSubscriptions } = await supabase
+            .from('user_subscriptions')
+            .select(`
+                id,
+                plan_id,
+                status,
+                billing_cycle,
+                created_at,
+                users!inner(name, email)
+            `)
+            .order('created_at', { ascending: false })
+            .limit(10);
+
+        const recentSubsList = (recentSubscriptions || []).map((sub: any) => ({
+            id: sub.id,
+            user_name: sub.users?.name || 'Unknown',
+            user_email: sub.users?.email || '',
+            plan_name: planMap[sub.plan_id]?.name || 'Unknown',
+            billing_cycle: sub.billing_cycle,
+            amount: sub.billing_cycle === 'yearly'
+                ? planMap[sub.plan_id]?.price_yearly || 0
+                : planMap[sub.plan_id]?.price_monthly || 0,
+            status: sub.status,
+            created_at: sub.created_at
+        }));
+
         res.json({
             total_users: totalUsers || 0,
             free_users: freeUsers,
@@ -1778,7 +1805,8 @@ router.get('/analytics/subscription-stats', async (req, res) => {
             plan_distribution: planCounts,
             total_income: totalIncome,
             monthly_revenue: last30DaysIncome,
-            income_trend: chartData
+            income_trend: chartData,
+            recent_subscriptions: recentSubsList
         });
     } catch (error) {
         console.error('Error fetching subscription stats:', error);
@@ -1847,6 +1875,30 @@ router.get('/analytics/content-stats', async (req, res) => {
             .sort((a, b) => b.count - a.count)
             .slice(0, 10);
 
+        // Content gaps - Topics with low question counts
+        const { data: allTopics } = await supabase
+            .from('topics')
+            .select(`
+                id,
+                name,
+                question_count,
+                subjects!inner(name)
+            `)
+            .eq('is_active', true)
+            .order('question_count', { ascending: true })
+            .limit(20);
+
+        const topicsWithLowQuestions = (allTopics || [])
+            .filter((t: any) => (t.question_count || 0) < 10)
+            .map((t: any) => ({
+                topic_id: t.id,
+                topic_name: t.name,
+                subject_name: t.subjects?.name || 'Unknown',
+                question_count: t.question_count || 0,
+                gap_severity: (t.question_count || 0) === 0 ? 'critical' :
+                    (t.question_count || 0) < 5 ? 'high' : 'medium'
+            }));
+
         res.json({
             total_questions: questions?.length || 0,
             questions_by_difficulty: difficultyCount,
@@ -1854,11 +1906,929 @@ router.get('/analytics/content-stats', async (req, res) => {
             total_topics: totalTopics || 0,
             total_exams: totalExams || 0,
             total_resources: totalResources || 0,
-            questions_per_subject: topSubjects
+            questions_per_subject: topSubjects,
+            content_gaps: topicsWithLowQuestions
         });
     } catch (error) {
         console.error('Error fetching content stats:', error);
         res.status(500).json({ error: 'Failed to fetch content stats' });
+    }
+});
+
+// GET /api/admin/analytics/user-engagement
+// Returns DAU, WAU, MAU and engagement metrics
+router.get('/analytics/user-engagement', async (req, res) => {
+    try {
+        const now = Date.now();
+        const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+        const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // DAU - Users active in last 24 hours
+        const { count: dau } = await supabase
+            .from('user_stats')
+            .select('*', { count: 'exact', head: true })
+            .gt('last_activity', oneDayAgo);
+
+        // WAU - Users active in last 7 days
+        const { count: wau } = await supabase
+            .from('user_stats')
+            .select('*', { count: 'exact', head: true })
+            .gt('last_activity', sevenDaysAgo);
+
+        // MAU - Users active in last 30 days
+        const { count: mau } = await supabase
+            .from('user_stats')
+            .select('*', { count: 'exact', head: true })
+            .gt('last_activity', thirtyDaysAgo);
+
+        // Average session metrics from user_learning_patterns
+        const { data: patterns } = await supabase
+            .from('user_learning_patterns')
+            .select('avg_session_duration_minutes, avg_questions_per_session');
+
+        let avgSessionDuration = 0;
+        let avgQuestionsPerSession = 0;
+        if (patterns && patterns.length > 0) {
+            avgSessionDuration = Math.round(patterns.reduce((sum: number, p: any) => sum + (p.avg_session_duration_minutes || 0), 0) / patterns.length);
+            avgQuestionsPerSession = Math.round(patterns.reduce((sum: number, p: any) => sum + (p.avg_questions_per_session || 0), 0) / patterns.length);
+        }
+
+        // Retention calculations
+        // Users who signed up 7 days ago and are still active
+        const sevenDaysAgoStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
+        const sevenDaysAgoEnd = new Date(now - 6 * 24 * 60 * 60 * 1000);
+        const { count: usersSignedUp7d } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', sevenDaysAgoStart.toISOString())
+            .lt('created_at', sevenDaysAgoEnd.toISOString());
+
+        const { count: usersStillActive7d } = await supabase
+            .from('user_stats')
+            .select('*, users!inner(created_at)', { count: 'exact', head: true })
+            .gt('users.created_at', sevenDaysAgoStart.toISOString())
+            .lt('users.created_at', sevenDaysAgoEnd.toISOString())
+            .gt('last_activity', sevenDaysAgo);
+
+        const retention7d = usersSignedUp7d && usersSignedUp7d > 0
+            ? Math.round(((usersStillActive7d || 0) / usersSignedUp7d) * 100)
+            : 0;
+
+        // 30-day retention
+        const thirtyDaysAgoStart = new Date(now - 30 * 24 * 60 * 60 * 1000);
+        const thirtyDaysAgoEnd = new Date(now - 29 * 24 * 60 * 60 * 1000);
+        const { count: usersSignedUp30d } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', thirtyDaysAgoStart.toISOString())
+            .lt('created_at', thirtyDaysAgoEnd.toISOString());
+
+        const { count: usersStillActive30d } = await supabase
+            .from('user_stats')
+            .select('*, users!inner(created_at)', { count: 'exact', head: true })
+            .gt('users.created_at', thirtyDaysAgoStart.toISOString())
+            .lt('users.created_at', thirtyDaysAgoEnd.toISOString())
+            .gt('last_activity', thirtyDaysAgo);
+
+        const retention30d = usersSignedUp30d && usersSignedUp30d > 0
+            ? Math.round(((usersStillActive30d || 0) / usersSignedUp30d) * 100)
+            : 0;
+
+        // Engagement trend (last 30 days) - daily active users and questions answered
+        const { data: dailyActivity } = await supabase
+            .from('user_stats')
+            .select('last_activity')
+            .gt('last_activity', thirtyDaysAgo);
+
+        const dauByDay: Record<string, number> = {};
+        (dailyActivity || []).forEach((item: any) => {
+            const date = new Date(item.last_activity).toISOString().split('T')[0];
+            dauByDay[date] = (dauByDay[date] || 0) + 1;
+        });
+
+        // Get questions answered per day from test_attempts
+        const { data: testAttempts } = await supabase
+            .from('test_attempts')
+            .select('started_at, total_questions')
+            .gt('started_at', thirtyDaysAgo);
+
+        const questionsByDay: Record<string, number> = {};
+        (testAttempts || []).forEach((attempt: any) => {
+            const date = new Date(attempt.started_at).toISOString().split('T')[0];
+            questionsByDay[date] = (questionsByDay[date] || 0) + (attempt.total_questions || 0);
+        });
+
+        const engagementTrend = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(now - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            engagementTrend.push({
+                date: dateStr,
+                dau: dauByDay[dateStr] || 0,
+                questions_answered: questionsByDay[dateStr] || 0
+            });
+        }
+
+        // Funnel data: Signups -> Active -> Tested -> Subscribed
+        const { count: totalUsers } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: usersWithActivity } = await supabase
+            .from('user_stats')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: usersWithTests } = await supabase
+            .from('test_attempts')
+            .select('user_id', { count: 'exact', head: true });
+
+        const { count: subscribedUsers } = await supabase
+            .from('user_subscriptions')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'active');
+
+        const funnelData = [
+            { stage: 'Signups', value: totalUsers || 0, fill: '#3B82F6' },
+            { stage: 'Active', value: usersWithActivity || 0, fill: '#10B981' },
+            { stage: 'Tested', value: usersWithTests || 0, fill: '#8B5CF6' },
+            { stage: 'Subscribed', value: subscribedUsers || 0, fill: '#F59E0B' }
+        ];
+
+        res.json({
+            dau: dau || 0,
+            wau: wau || 0,
+            mau: mau || 0,
+            avg_session_duration_mins: avgSessionDuration,
+            avg_questions_per_session: avgQuestionsPerSession,
+            retention_7d: retention7d,
+            retention_30d: retention30d,
+            engagement_trend: engagementTrend,
+            funnel: funnelData
+        });
+    } catch (error) {
+        console.error('Error fetching user engagement stats:', error);
+        res.status(500).json({ error: 'Failed to fetch user engagement stats' });
+    }
+});
+
+// GET /api/admin/analytics/retention-cohorts
+// Returns week-over-week retention cohort analysis
+router.get('/analytics/retention-cohorts', async (req, res) => {
+    try {
+        const cohorts = [];
+        const now = Date.now();
+
+        // Generate cohorts for last 8 weeks
+        for (let weekOffset = 0; weekOffset < 8; weekOffset++) {
+            const weekStart = new Date(now - (weekOffset + 1) * 7 * 24 * 60 * 60 * 1000);
+            const weekEnd = new Date(now - weekOffset * 7 * 24 * 60 * 60 * 1000);
+
+            // Users who signed up in this week
+            const { data: cohortUsers } = await supabase
+                .from('users')
+                .select('id, created_at')
+                .gte('created_at', weekStart.toISOString())
+                .lt('created_at', weekEnd.toISOString());
+
+            const cohortSize = cohortUsers?.length || 0;
+            if (cohortSize === 0) continue;
+
+            const cohortUserIds = (cohortUsers || []).map(u => u.id);
+
+            // Calculate retention for each subsequent week
+            const weeklyRetention: number[] = [];
+            for (let retentionWeek = 1; retentionWeek <= Math.min(weekOffset + 1, 6); retentionWeek++) {
+                const retentionWeekStart = new Date(weekEnd.getTime() + (retentionWeek - 1) * 7 * 24 * 60 * 60 * 1000);
+                const retentionWeekEnd = new Date(weekEnd.getTime() + retentionWeek * 7 * 24 * 60 * 60 * 1000);
+
+                // Count users still active in that week
+                const { count: activeInWeek } = await supabase
+                    .from('user_stats')
+                    .select('*', { count: 'exact', head: true })
+                    .in('user_id', cohortUserIds)
+                    .gte('last_activity', retentionWeekStart.toISOString())
+                    .lt('last_activity', retentionWeekEnd.toISOString());
+
+                const retentionRate = Math.round(((activeInWeek || 0) / cohortSize) * 100);
+                weeklyRetention.push(retentionRate);
+            }
+
+            cohorts.push({
+                cohort_week: `Week ${weekOffset + 1}`,
+                week_start: weekStart.toISOString().split('T')[0],
+                cohort_size: cohortSize,
+                retention: weeklyRetention
+            });
+        }
+
+        res.json({
+            cohorts: cohorts.reverse(),
+            weeks: ['W1', 'W2', 'W3', 'W4', 'W5', 'W6']
+        });
+    } catch (error) {
+        console.error('Error fetching retention cohorts:', error);
+        res.status(500).json({ error: 'Failed to fetch retention cohorts' });
+    }
+});
+
+// GET /api/admin/analytics/ltv
+// Returns lifetime value calculations by cohort
+router.get('/analytics/ltv', async (req, res) => {
+    try {
+        const now = Date.now();
+        const cohortLTV = [];
+
+        // Get all payment orders with user info
+        const { data: payments } = await supabase
+            .from('payment_orders')
+            .select('user_id, amount, paid_at')
+            .eq('status', 'paid');
+
+        // Get all users with their signup dates
+        const { data: users } = await supabase
+            .from('users')
+            .select('id, created_at');
+
+        // Group users by signup month
+        const usersByMonth: Record<string, string[]> = {};
+        (users || []).forEach((u: any) => {
+            const month = new Date(u.created_at).toISOString().slice(0, 7); // YYYY-MM
+            if (!usersByMonth[month]) usersByMonth[month] = [];
+            usersByMonth[month].push(u.id);
+        });
+
+        // Calculate revenue per cohort
+        const paymentsByUser: Record<string, number> = {};
+        (payments || []).forEach((p: any) => {
+            paymentsByUser[p.user_id] = (paymentsByUser[p.user_id] || 0) + parseFloat(p.amount || 0);
+        });
+
+        // Get total users and subscribers
+        const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
+        const { count: totalSubscribers } = await supabase.from('user_subscriptions').select('*', { count: 'exact', head: true }).eq('status', 'active');
+
+        const totalRevenue = Object.values(paymentsByUser).reduce((sum, val) => sum + val, 0);
+        const avgRevenuePerUser = totalUsers ? totalRevenue / totalUsers : 0;
+        const avgRevenuePerPaidUser = totalSubscribers ? totalRevenue / totalSubscribers : 0;
+
+        // Calculate LTV by month cohort (last 6 months)
+        for (let monthOffset = 0; monthOffset < 6; monthOffset++) {
+            const monthDate = new Date(now);
+            monthDate.setMonth(monthDate.getMonth() - monthOffset);
+            const monthKey = monthDate.toISOString().slice(0, 7);
+
+            const cohortUserIds = usersByMonth[monthKey] || [];
+            const cohortSize = cohortUserIds.length;
+
+            if (cohortSize === 0) continue;
+
+            const cohortRevenue = cohortUserIds.reduce((sum, id) => sum + (paymentsByUser[id] || 0), 0);
+            const paidUsers = cohortUserIds.filter(id => paymentsByUser[id] > 0).length;
+            const conversionRate = Math.round((paidUsers / cohortSize) * 100);
+            const ltv = cohortSize > 0 ? Math.round(cohortRevenue / cohortSize) : 0;
+            const arppu = paidUsers > 0 ? Math.round(cohortRevenue / paidUsers) : 0;
+
+            cohortLTV.push({
+                month: monthKey,
+                month_label: monthDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+                cohort_size: cohortSize,
+                paid_users: paidUsers,
+                conversion_rate: conversionRate,
+                total_revenue: Math.round(cohortRevenue),
+                ltv: ltv,
+                arppu: arppu
+            });
+        }
+
+        res.json({
+            overall: {
+                total_users: totalUsers || 0,
+                total_revenue: Math.round(totalRevenue),
+                avg_revenue_per_user: Math.round(avgRevenuePerUser),
+                avg_revenue_per_paid_user: Math.round(avgRevenuePerPaidUser)
+            },
+            cohorts: cohortLTV.reverse()
+        });
+    } catch (error) {
+        console.error('Error fetching LTV stats:', error);
+        res.status(500).json({ error: 'Failed to fetch LTV stats' });
+    }
+});
+
+// GET /api/admin/analytics/exam-coverage
+// Returns exam coverage matrix (questions per topic per exam)
+router.get('/analytics/exam-coverage', async (req, res) => {
+    try {
+        // Get all active exams
+        const { data: exams } = await supabase
+            .from('exams')
+            .select('id, name')
+            .eq('is_active', true)
+            .order('name');
+
+        // Get all subjects with their topics
+        const { data: subjects } = await supabase
+            .from('subjects')
+            .select(`
+                id,
+                name,
+                topics(id, name, question_count)
+            `)
+            .eq('is_active', true)
+            .order('name');
+
+        // Get question counts by topic and exam
+        const { data: questionExamTopics } = await supabase
+            .from('questions')
+            .select('topic_id, exam_id')
+            .eq('is_active', true);
+
+        // Build coverage matrix
+        const coverageByTopicExam: Record<string, Record<string, number>> = {};
+        (questionExamTopics || []).forEach((q: any) => {
+            if (!q.topic_id || !q.exam_id) return;
+            if (!coverageByTopicExam[q.topic_id]) coverageByTopicExam[q.topic_id] = {};
+            coverageByTopicExam[q.topic_id][q.exam_id] = (coverageByTopicExam[q.topic_id][q.exam_id] || 0) + 1;
+        });
+
+        // Format matrix data
+        const matrix: any[] = [];
+        (subjects || []).forEach((subject: any) => {
+            (subject.topics || []).forEach((topic: any) => {
+                const row: any = {
+                    subject_name: subject.name,
+                    topic_id: topic.id,
+                    topic_name: topic.name,
+                    total_questions: topic.question_count || 0,
+                    exams: {}
+                };
+
+                (exams || []).forEach((exam: any) => {
+                    row.exams[exam.id] = coverageByTopicExam[topic.id]?.[exam.id] || 0;
+                });
+
+                // Calculate coverage gaps
+                const examCounts = Object.values(row.exams) as number[];
+                const hasGap = examCounts.some((count: number) => count === 0);
+                const avgPerExam = examCounts.length > 0
+                    ? Math.round(examCounts.reduce((a: number, b: number) => a + b, 0) / examCounts.length)
+                    : 0;
+
+                row.has_gap = hasGap;
+                row.avg_per_exam = avgPerExam;
+                matrix.push(row);
+            });
+        });
+
+        // Sort by gaps first, then by lowest average
+        matrix.sort((a, b) => {
+            if (a.has_gap !== b.has_gap) return a.has_gap ? -1 : 1;
+            return a.avg_per_exam - b.avg_per_exam;
+        });
+
+        res.json({
+            exams: (exams || []).map((e: any) => ({ id: e.id, name: e.name })),
+            matrix: matrix.slice(0, 50) // Limit to top 50 topics
+        });
+    } catch (error) {
+        console.error('Error fetching exam coverage:', error);
+        res.status(500).json({ error: 'Failed to fetch exam coverage' });
+    }
+});
+
+// GET /api/admin/analytics/test-performance
+// Returns test performance metrics and topic-level analytics
+router.get('/analytics/test-performance', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Total test attempts
+        const { count: totalAttempts } = await supabase
+            .from('test_attempts')
+            .select('*', { count: 'exact', head: true });
+
+        // Get all completed attempts for stats
+        const { data: attempts } = await supabase
+            .from('test_attempts')
+            .select('score, total_questions, percentage, time_taken_seconds, test_id')
+            .not('completed_at', 'is', null);
+
+        const avgScore = attempts && attempts.length > 0
+            ? Math.round(attempts.reduce((sum: number, a: any) => sum + (a.percentage || 0), 0) / attempts.length)
+            : 0;
+
+        const avgCompletionTime = attempts && attempts.length > 0
+            ? Math.round(attempts.reduce((sum: number, a: any) => sum + ((a.time_taken_seconds || 0) / 60), 0) / attempts.length)
+            : 0;
+
+        const passedAttempts = attempts?.filter((a: any) => (a.percentage || 0) >= 60).length || 0;
+        const passRate = attempts && attempts.length > 0
+            ? Math.round((passedAttempts / attempts.length) * 100)
+            : 0;
+
+        // Tests by category with avg score
+        const { data: testsWithCategory } = await supabase
+            .from('test_attempts')
+            .select(`
+                percentage,
+                tests!inner(
+                    test_category_id,
+                    test_category:test_categories(name)
+                )
+            `)
+            .not('completed_at', 'is', null);
+
+        const categoryStats: Record<string, { count: number; totalScore: number }> = {};
+        (testsWithCategory || []).forEach((t: any) => {
+            const catName = t.tests?.test_category?.name || 'Uncategorized';
+            if (!categoryStats[catName]) {
+                categoryStats[catName] = { count: 0, totalScore: 0 };
+            }
+            categoryStats[catName].count++;
+            categoryStats[catName].totalScore += t.percentage || 0;
+        });
+
+        const testsByCategory = Object.entries(categoryStats).map(([category, stats]) => ({
+            category,
+            count: stats.count,
+            avg_score: Math.round(stats.totalScore / stats.count)
+        }));
+
+        // Difficulty performance
+        const { data: userAnswers } = await supabase
+            .from('user_answers')
+            .select(`
+                is_correct,
+                questions!inner(difficulty)
+            `);
+
+        const difficultyStats: Record<string, { correct: number; total: number }> = {
+            easy: { correct: 0, total: 0 },
+            medium: { correct: 0, total: 0 },
+            hard: { correct: 0, total: 0 }
+        };
+
+        (userAnswers || []).forEach((a: any) => {
+            const diff = a.questions?.difficulty || 'medium';
+            if (difficultyStats[diff]) {
+                difficultyStats[diff].total++;
+                if (a.is_correct) difficultyStats[diff].correct++;
+            }
+        });
+
+        const difficultyPerformance = {
+            easy: difficultyStats.easy.total > 0
+                ? Math.round((difficultyStats.easy.correct / difficultyStats.easy.total) * 100) : 0,
+            medium: difficultyStats.medium.total > 0
+                ? Math.round((difficultyStats.medium.correct / difficultyStats.medium.total) * 100) : 0,
+            hard: difficultyStats.hard.total > 0
+                ? Math.round((difficultyStats.hard.correct / difficultyStats.hard.total) * 100) : 0
+        };
+
+        // Topic performance (aggregate from user_answers)
+        const { data: topicAnswers } = await supabase
+            .from('user_answers')
+            .select(`
+                is_correct,
+                questions!inner(
+                    topic_id,
+                    topics!inner(name)
+                )
+            `);
+
+        const topicStats: Record<string, { name: string; correct: number; total: number }> = {};
+        (topicAnswers || []).forEach((a: any) => {
+            const topicId = a.questions?.topic_id;
+            const topicName = a.questions?.topics?.name || 'Unknown';
+            if (topicId) {
+                if (!topicStats[topicId]) {
+                    topicStats[topicId] = { name: topicName, correct: 0, total: 0 };
+                }
+                topicStats[topicId].total++;
+                if (a.is_correct) topicStats[topicId].correct++;
+            }
+        });
+
+        const allTopics = Object.entries(topicStats)
+            .map(([id, stats]) => ({
+                topic_name: stats.name,
+                avg_score: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
+                attempts: stats.total
+            }))
+            .filter(t => t.attempts >= 5); // Only topics with significant attempts
+
+        const topPerformingTopics = [...allTopics]
+            .sort((a, b) => b.avg_score - a.avg_score)
+            .slice(0, 5);
+
+        const strugglingTopics = [...allTopics]
+            .sort((a, b) => a.avg_score - b.avg_score)
+            .slice(0, 5);
+
+        // Attempts trend (last 30 days)
+        const { data: recentAttempts } = await supabase
+            .from('test_attempts')
+            .select('started_at, percentage')
+            .gt('started_at', thirtyDaysAgo)
+            .not('completed_at', 'is', null);
+
+        const attemptsByDay: Record<string, { count: number; totalScore: number }> = {};
+        (recentAttempts || []).forEach((a: any) => {
+            const date = new Date(a.started_at).toISOString().split('T')[0];
+            if (!attemptsByDay[date]) {
+                attemptsByDay[date] = { count: 0, totalScore: 0 };
+            }
+            attemptsByDay[date].count++;
+            attemptsByDay[date].totalScore += a.percentage || 0;
+        });
+
+        const attemptsTrend = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            const dayStats = attemptsByDay[dateStr];
+            attemptsTrend.push({
+                date: dateStr,
+                count: dayStats?.count || 0,
+                avg_score: dayStats && dayStats.count > 0
+                    ? Math.round(dayStats.totalScore / dayStats.count) : 0
+            });
+        }
+
+        // Topic heatmap data (all topics with minimum attempts)
+        const topicHeatmap = Object.entries(topicStats)
+            .map(([id, stats]) => ({
+                topic_id: id,
+                topic_name: stats.name,
+                accuracy: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
+                attempts: stats.total
+            }))
+            .filter(t => t.attempts >= 3)
+            .sort((a, b) => a.topic_name.localeCompare(b.topic_name));
+
+        res.json({
+            total_attempts: totalAttempts || 0,
+            avg_score: avgScore,
+            avg_completion_time_mins: avgCompletionTime,
+            pass_rate: passRate,
+            tests_by_category: testsByCategory,
+            difficulty_performance: difficultyPerformance,
+            top_performing_topics: topPerformingTopics,
+            struggling_topics: strugglingTopics,
+            attempts_trend: attemptsTrend,
+            topic_heatmap: topicHeatmap
+        });
+    } catch (error) {
+        console.error('Error fetching test performance stats:', error);
+        res.status(500).json({ error: 'Failed to fetch test performance stats' });
+    }
+});
+
+// GET /api/admin/analytics/feature-adoption
+// Returns adoption metrics for Marathon, Daily Practice, Custom Tests, etc.
+router.get('/analytics/feature-adoption', async (req, res) => {
+    try {
+        // Marathon stats
+        const { count: totalMarathonSessions } = await supabase
+            .from('marathon_sessions')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: activeMarathonSessions } = await supabase
+            .from('marathon_sessions')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'active');
+
+        const { data: marathonData } = await supabase
+            .from('marathon_sessions')
+            .select('questions_mastered, total_questions')
+            .eq('status', 'completed');
+
+        let avgMasteryRate = 0;
+        let totalMastered = 0;
+        if (marathonData && marathonData.length > 0) {
+            totalMastered = marathonData.reduce((sum: number, m: any) => sum + (m.questions_mastered || 0), 0);
+            const totalQuestions = marathonData.reduce((sum: number, m: any) => sum + (m.total_questions || 1), 0);
+            avgMasteryRate = totalQuestions > 0 ? Math.round((totalMastered / totalQuestions) * 100) : 0;
+        }
+
+        // Daily Practice stats
+        const { count: totalDailySessions } = await supabase
+            .from('daily_practice_sessions')
+            .select('*', { count: 'exact', head: true });
+
+        const { data: dailyData } = await supabase
+            .from('daily_practice_sessions')
+            .select('questions_answered, total_questions')
+            .eq('status', 'completed');
+
+        let avgDailyCompletionRate = 0;
+        if (dailyData && dailyData.length > 0) {
+            const totalAnswered = dailyData.reduce((sum: number, d: any) => sum + (d.questions_answered || 0), 0);
+            const totalQ = dailyData.reduce((sum: number, d: any) => sum + (d.total_questions || 1), 0);
+            avgDailyCompletionRate = totalQ > 0 ? Math.round((totalAnswered / totalQ) * 100) : 0;
+        }
+
+        const { count: usersWithDailyConfig } = await supabase
+            .from('daily_practice_config')
+            .select('*', { count: 'exact', head: true });
+
+        // Custom Tests stats
+        const { count: totalCustomTests } = await supabase
+            .from('custom_tests')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: completedCustomTests } = await supabase
+            .from('custom_tests')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'completed');
+
+        const { data: customTestData } = await supabase
+            .from('custom_tests')
+            .select('total_questions');
+
+        const avgQuestionsPerCustomTest = customTestData && customTestData.length > 0
+            ? Math.round(customTestData.reduce((sum: number, t: any) => sum + (t.total_questions || 0), 0) / customTestData.length)
+            : 0;
+
+        // Saved Questions stats
+        const { count: totalSavedQuestions } = await supabase
+            .from('saved_questions')
+            .select('*', { count: 'exact', head: true });
+
+        const { data: userSaves } = await supabase
+            .from('saved_questions')
+            .select('user_id');
+
+        const uniqueUsersWithSaves = new Set((userSaves || []).map((s: any) => s.user_id)).size;
+
+        // Mistakes Practice stats
+        const { count: totalMistakes } = await supabase
+            .from('user_mistakes')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: resolvedMistakes } = await supabase
+            .from('user_mistakes')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_resolved', true);
+
+        const resolutionRate = totalMistakes && totalMistakes > 0
+            ? Math.round(((resolvedMistakes || 0) / totalMistakes) * 100)
+            : 0;
+
+        res.json({
+            marathon: {
+                total_sessions: totalMarathonSessions || 0,
+                active_sessions: activeMarathonSessions || 0,
+                avg_mastery_rate: avgMasteryRate,
+                total_questions_mastered: totalMastered
+            },
+            daily_practice: {
+                total_sessions: totalDailySessions || 0,
+                avg_completion_rate: avgDailyCompletionRate,
+                users_with_config: usersWithDailyConfig || 0
+            },
+            custom_tests: {
+                total_created: totalCustomTests || 0,
+                completed_count: completedCustomTests || 0,
+                avg_questions_per_test: avgQuestionsPerCustomTest
+            },
+            saved_questions: {
+                total_saved: totalSavedQuestions || 0,
+                users_with_saves: uniqueUsersWithSaves
+            },
+            mistakes_practice: {
+                total_tracked: totalMistakes || 0,
+                resolved_count: resolvedMistakes || 0,
+                resolution_rate: resolutionRate
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching feature adoption stats:', error);
+        res.status(500).json({ error: 'Failed to fetch feature adoption stats' });
+    }
+});
+
+// GET /api/admin/analytics/promo-performance
+// Returns promo code usage and revenue impact
+router.get('/analytics/promo-performance', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Total and active promo codes
+        const { count: totalCodes } = await supabase
+            .from('promo_codes')
+            .select('*', { count: 'exact', head: true });
+
+        const { count: activeCodes } = await supabase
+            .from('promo_codes')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_active', true)
+            .gt('end_date', new Date().toISOString());
+
+        // Total redemptions
+        const { count: totalRedemptions } = await supabase
+            .from('promo_code_usages')
+            .select('*', { count: 'exact', head: true });
+
+        // Total discount given
+        const { data: usages } = await supabase
+            .from('promo_code_usages')
+            .select('discount_applied');
+
+        const totalDiscountGiven = (usages || []).reduce((sum: number, u: any) =>
+            sum + parseFloat(u.discount_applied || 0), 0);
+
+        // Conversion rate (usage that led to successful payment)
+        const { count: successfulPayments } = await supabase
+            .from('payment_orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'paid')
+            .not('promo_code_id', 'is', null);
+
+        const conversionRate = totalRedemptions && totalRedemptions > 0
+            ? Math.round(((successfulPayments || 0) / totalRedemptions) * 100)
+            : 0;
+
+        // Top codes by usage
+        const { data: promoCodes } = await supabase
+            .from('promo_codes')
+            .select('id, code, current_uses');
+
+        // Get revenue generated by promo code
+        const { data: promoPayments } = await supabase
+            .from('payment_orders')
+            .select('promo_code_id, amount')
+            .eq('status', 'paid')
+            .not('promo_code_id', 'is', null);
+
+        const revenueByCode: Record<string, number> = {};
+        (promoPayments || []).forEach((p: any) => {
+            if (p.promo_code_id) {
+                revenueByCode[p.promo_code_id] = (revenueByCode[p.promo_code_id] || 0) + parseFloat(p.amount || 0);
+            }
+        });
+
+        const topCodes = (promoCodes || [])
+            .map((p: any) => ({
+                code: p.code,
+                uses: p.current_uses || 0,
+                revenue_generated: revenueByCode[p.id] || 0
+            }))
+            .sort((a, b) => b.uses - a.uses)
+            .slice(0, 10);
+
+        // Usage trend (last 30 days)
+        const { data: recentUsages } = await supabase
+            .from('promo_code_usages')
+            .select('used_at')
+            .gt('used_at', thirtyDaysAgo);
+
+        const usageByDay: Record<string, number> = {};
+        (recentUsages || []).forEach((u: any) => {
+            const date = new Date(u.used_at).toISOString().split('T')[0];
+            usageByDay[date] = (usageByDay[date] || 0) + 1;
+        });
+
+        const usageTrend = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            usageTrend.push({
+                date: dateStr,
+                uses: usageByDay[dateStr] || 0
+            });
+        }
+
+        res.json({
+            total_codes: totalCodes || 0,
+            active_codes: activeCodes || 0,
+            total_redemptions: totalRedemptions || 0,
+            total_discount_given: Math.round(totalDiscountGiven * 100) / 100,
+            conversion_rate: conversionRate,
+            top_codes: topCodes,
+            usage_trend: usageTrend
+        });
+    } catch (error) {
+        console.error('Error fetching promo performance stats:', error);
+        res.status(500).json({ error: 'Failed to fetch promo performance stats' });
+    }
+});
+
+// GET /api/admin/analytics/user-growth
+// Returns enhanced user growth metrics
+router.get('/analytics/user-growth', async (req, res) => {
+    try {
+        const now = Date.now();
+        const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+        const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const fourteenDaysAgo = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
+        const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const sixtyDaysAgo = new Date(now - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Total users
+        const { count: totalUsers } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true });
+
+        // New today
+        const { count: newToday } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', oneDayAgo);
+
+        // New this week
+        const { count: newThisWeek } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', sevenDaysAgo);
+
+        // New this month
+        const { count: newThisMonth } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', thirtyDaysAgo);
+
+        // Previous week for growth rate
+        const { count: previousWeek } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', fourteenDaysAgo)
+            .lt('created_at', sevenDaysAgo);
+
+        const growthRateWeekly = previousWeek && previousWeek > 0
+            ? Math.round((((newThisWeek || 0) - previousWeek) / previousWeek) * 100)
+            : 0;
+
+        // Previous month for growth rate
+        const { count: previousMonth } = await supabase
+            .from('users')
+            .select('*', { count: 'exact', head: true })
+            .gt('created_at', sixtyDaysAgo)
+            .lt('created_at', thirtyDaysAgo);
+
+        const growthRateMonthly = previousMonth && previousMonth > 0
+            ? Math.round((((newThisMonth || 0) - previousMonth) / previousMonth) * 100)
+            : 0;
+
+        // Users by target exam
+        const { data: usersByExam } = await supabase
+            .from('users')
+            .select(`
+                target_exam_id,
+                exams!users_target_exam_id_fkey(name)
+            `)
+            .not('target_exam_id', 'is', null);
+
+        const examCounts: Record<string, { name: string; count: number }> = {};
+        (usersByExam || []).forEach((u: any) => {
+            const examId = u.target_exam_id;
+            const examName = u.exams?.name || 'Unknown';
+            if (!examCounts[examId]) {
+                examCounts[examId] = { name: examName, count: 0 };
+            }
+            examCounts[examId].count++;
+        });
+
+        const byTargetExam = Object.values(examCounts)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        // Daily signups trend (last 30 days)
+        const { data: recentUsers } = await supabase
+            .from('users')
+            .select('created_at')
+            .gt('created_at', thirtyDaysAgo);
+
+        const signupsByDay: Record<string, number> = {};
+        (recentUsers || []).forEach((u: any) => {
+            const date = new Date(u.created_at).toISOString().split('T')[0];
+            signupsByDay[date] = (signupsByDay[date] || 0) + 1;
+        });
+
+        const dailySignups = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(now - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            dailySignups.push({
+                date: dateStr,
+                count: signupsByDay[dateStr] || 0
+            });
+        }
+
+        res.json({
+            total_users: totalUsers || 0,
+            new_today: newToday || 0,
+            new_this_week: newThisWeek || 0,
+            new_this_month: newThisMonth || 0,
+            growth_rate_weekly: growthRateWeekly,
+            growth_rate_monthly: growthRateMonthly,
+            by_target_exam: byTargetExam,
+            daily_signups: dailySignups
+        });
+    } catch (error) {
+        console.error('Error fetching user growth stats:', error);
+        res.status(500).json({ error: 'Failed to fetch user growth stats' });
     }
 });
 
@@ -2387,6 +3357,61 @@ router.get('/support/stats', async (req, res) => {
             avgResolutionHours = Math.round(totalHours / resolvedRecent.length);
         }
 
+        // Pending tickets (open or in_progress) with details for table
+        const { data: pendingTickets } = await supabase
+            .from('support_tickets')
+            .select(`
+                id,
+                issue_type,
+                message,
+                status,
+                created_at,
+                users!inner(name, email)
+            `)
+            .in('status', ['open', 'in_progress'])
+            .order('created_at', { ascending: true })
+            .limit(10);
+
+        const pendingTicketsList = (pendingTickets || []).map((t: any) => {
+            const createdAt = new Date(t.created_at);
+            const ageHours = Math.round((Date.now() - createdAt.getTime()) / (1000 * 60 * 60));
+            const ageDisplay = ageHours < 24 ? `${ageHours}h` : `${Math.round(ageHours / 24)}d`;
+            return {
+                id: t.id,
+                ticket_number: `#${t.id.slice(0, 8).toUpperCase()}`,
+                user_name: t.users?.name || 'Unknown',
+                user_email: t.users?.email || '',
+                issue_type: t.issue_type,
+                message: t.message?.slice(0, 100) + (t.message?.length > 100 ? '...' : ''),
+                status: t.status,
+                age: ageDisplay,
+                age_hours: ageHours,
+                created_at: t.created_at
+            };
+        });
+
+        // Ticket trend (last 30 days)
+        const { data: ticketTrendData } = await supabase
+            .from('support_tickets')
+            .select('created_at')
+            .gt('created_at', thirtyDaysAgo);
+
+        const ticketsByDay: Record<string, number> = {};
+        (ticketTrendData || []).forEach((t: any) => {
+            const date = new Date(t.created_at).toISOString().split('T')[0];
+            ticketsByDay[date] = (ticketsByDay[date] || 0) + 1;
+        });
+
+        const ticketTrend = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            ticketTrend.push({
+                date: dateStr,
+                count: ticketsByDay[dateStr] || 0
+            });
+        }
+
         res.json({
             total_tickets: totalTickets || 0,
             open_tickets: openTickets || 0,
@@ -2394,7 +3419,9 @@ router.get('/support/stats', async (req, res) => {
             resolved_tickets: resolvedTickets || 0,
             tickets_by_type: typeCount,
             recent_tickets_7d: recentTickets || 0,
-            avg_resolution_hours: avgResolutionHours
+            avg_resolution_hours: avgResolutionHours,
+            pending_tickets: pendingTicketsList,
+            ticket_trend: ticketTrend
         });
     } catch (error) {
         console.error('Error fetching support stats:', error);
