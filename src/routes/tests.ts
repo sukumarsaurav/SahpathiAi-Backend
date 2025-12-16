@@ -87,9 +87,17 @@ router.get('/category/:categoryId', optionalAuth, async (req, res) => {
         }
 
         // Build query with optional exam filter
+        // Join with exam_subjects and subjects to get subject info for filtering
         let query = supabaseAdmin
             .from('tests')
-            .select('*, test_questions(count)')
+            .select(`
+                *,
+                test_questions(count),
+                exam_subject:exam_subjects!subject_id(
+                    id,
+                    subject:subjects(id, name, color, icon)
+                )
+            `)
             .eq('test_category_id', targetId)
             .eq('is_active', true);
 
