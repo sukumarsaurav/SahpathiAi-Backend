@@ -53,18 +53,20 @@ router.get('/categories', optionalAuth, async (req, res) => {
  * GET /api/tests/category/:categoryId
  * Get tests by category (optionally filtered by exam)
  * Query params: examId (optional) - filter by exam
+ * Returns hasAttempted: true/false for each test if user is authenticated
  */
-router.get('/category/:categoryId', async (req, res) => {
+router.get('/category/:categoryId', optionalAuth, async (req, res) => {
     try {
         const { categoryId } = req.params;
         const { examId } = req.query;
+        const userId = req.user?.id;
 
         // If categoryId is a UUID, use it directly.
         // If it's a slug (e.g., 'topic-wise'), resolve it first.
         let targetId = categoryId;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
 
-        console.log(`[TestsAPI] Fetching tests for category: "${categoryId}" (IsUUID: ${isUuid}), examId: ${examId || 'all'}`);
+        console.log(`[TestsAPI] Fetching tests for category: "${categoryId}" (IsUUID: ${isUuid}), examId: ${examId || 'all'}, userId: ${userId || 'anonymous'}`);
 
         if (!isUuid) {
             const { data: cat, error: catError } = await supabaseAdmin
@@ -106,10 +108,27 @@ router.get('/category/:categoryId', async (req, res) => {
 
         console.log(`[TestsAPI] Found ${data?.length} tests for category ID ${targetId}${examId ? ` and exam ${examId}` : ''}`);
 
-        // Map data to include total_questions from the count
+        // Get user's attempt status for each test if authenticated
+        let attemptedTestIds: Set<string> = new Set();
+        if (userId && data && data.length > 0) {
+            const testIds = data.map(t => t.id);
+            const { data: attempts } = await supabaseAdmin
+                .from('test_attempts')
+                .select('test_id')
+                .eq('user_id', userId)
+                .in('test_id', testIds)
+                .not('completed_at', 'is', null); // Only count completed attempts
+
+            if (attempts) {
+                attemptedTestIds = new Set(attempts.map(a => a.test_id));
+            }
+        }
+
+        // Map data to include total_questions and hasAttempted
         const testsWithCount = data.map(test => ({
             ...test,
-            total_questions: test.test_questions?.[0]?.count || 0
+            total_questions: test.test_questions?.[0]?.count || 0,
+            hasAttempted: attemptedTestIds.has(test.id)
         }));
 
         res.json(testsWithCount);
