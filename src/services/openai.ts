@@ -255,6 +255,63 @@ Respond with JSON:
 }
 
 /**
+ * Suggest new concepts for a topic based on existing concepts
+ */
+export async function suggestNewConcepts(params: {
+    topicName: string;
+    subjectName: string;
+    existingConcepts: { name: string; description?: string }[];
+    count?: number;
+}): Promise<{ name: string; description: string; difficulty_level: number }[]> {
+    const { topicName, subjectName, existingConcepts, count = 10 } = params;
+
+    const existingList = existingConcepts.length > 0
+        ? existingConcepts.map(c => `- ${c.name}${c.description ? `: ${c.description}` : ''}`).join('\n')
+        : 'No existing concepts yet.';
+
+    const systemPrompt = `You are an expert curriculum designer specializing in creating comprehensive learning content for competitive exams.
+Your task is to suggest NEW concepts that are missing from a topic's coverage.`;
+
+    const userPrompt = `Suggest ${count} NEW concepts for the following topic that are NOT already covered:
+
+SUBJECT: ${subjectName}
+TOPIC: ${topicName}
+
+EXISTING CONCEPTS (do NOT suggest these):
+${existingList}
+
+Suggest concepts that:
+1. Are fundamental to understanding this topic
+2. Are commonly tested in competitive exams
+3. Fill gaps in the existing concept coverage
+4. Progress from basic to advanced understanding
+
+Respond with JSON:
+{
+  "suggestions": [
+    {
+      "name": "Concept Name",
+      "description": "Brief description of what this concept covers",
+      "difficulty_level": 5
+    }
+  ]
+}
+
+difficulty_level: 1-10 where 1=very easy, 10=very hard`;
+
+    const response = await callOpenAI(
+        [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+        ],
+        'json'
+    );
+
+    const parsed = JSON.parse(response);
+    return parsed.suggestions || [];
+}
+
+/**
  * Suggest concepts for a question based on its content
  */
 export async function suggestConcepts(

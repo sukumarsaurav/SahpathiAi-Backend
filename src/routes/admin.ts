@@ -387,6 +387,48 @@ router.delete('/topics/:id', async (req, res) => {
     }
 });
 
+// POST /api/admin/topics/:id/suggest-concepts
+// Get AI-suggested concepts for a topic based on existing concepts
+router.post('/topics/:id/suggest-concepts', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { count = 10 } = req.body;
+
+        // Get topic with subject info
+        const { data: topic, error: topicError } = await supabase
+            .from('topics')
+            .select('id, name, subject_id, subjects(name)')
+            .eq('id', id)
+            .single();
+
+        if (topicError || !topic) {
+            return res.status(404).json({ error: 'Topic not found' });
+        }
+
+        // Get existing concepts for this topic
+        const { data: existingConcepts, error: conceptsError } = await supabase
+            .from('concepts')
+            .select('name, description')
+            .eq('topic_id', id);
+
+        if (conceptsError) throw conceptsError;
+
+        // Import and call AI service
+        const { suggestNewConcepts } = await import('../services/openai.js');
+        const suggestions = await suggestNewConcepts({
+            topicName: topic.name,
+            subjectName: (topic.subjects as any)?.name || 'Unknown Subject',
+            existingConcepts: existingConcepts || [],
+            count
+        });
+
+        res.json({ suggestions });
+    } catch (error: any) {
+        console.error('Error suggesting concepts:', error);
+        res.status(500).json({ error: error.message || 'Failed to generate concept suggestions' });
+    }
+});
+
 // GET /api/admin/topics/by-exam-subject/:examSubjectId
 // Get topics for a specific exam-subject combination
 router.get('/topics/by-exam-subject/:examSubjectId', async (req, res) => {
