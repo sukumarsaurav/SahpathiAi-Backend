@@ -719,7 +719,8 @@ router.get('/questions', async (req, res) => {
             difficulty,
             sortBy = 'created_at',
             sortOrder = 'desc',
-            search
+            search,
+            aiStatus // 'all' | 'ai_unverified' | 'ai_verified' | 'manual'
         } = req.query;
         const offset = (Number(page) - 1) * Number(limit);
 
@@ -742,6 +743,8 @@ router.get('/questions', async (req, res) => {
                 difficulty,
                 correct_answer_index,
                 is_active,
+                is_ai_generated,
+                is_verified,
                 created_at
             `, { count: 'exact' });
 
@@ -756,6 +759,15 @@ router.get('/questions', async (req, res) => {
         // Apply difficulty filter
         if (difficulty) {
             query = query.eq('difficulty', difficulty);
+        }
+
+        // Apply AI status filter
+        if (aiStatus === 'ai_unverified') {
+            query = query.eq('is_ai_generated', true).eq('is_verified', false);
+        } else if (aiStatus === 'ai_verified') {
+            query = query.eq('is_ai_generated', true).eq('is_verified', true);
+        } else if (aiStatus === 'manual') {
+            query = query.eq('is_ai_generated', false);
         }
 
         // Apply sorting
@@ -2558,4 +2570,411 @@ router.get('/promo-codes/:id/usages', async (req, res) => {
     }
 });
 
+// =====================================================
+// AI QUESTION GENERATION
+// =====================================================
+
+import {
+    generateQuestions as aiGenerateQuestions,
+    translateQuestion as aiTranslateQuestion,
+    suggestConcepts as aiSuggestConcepts,
+    checkForDuplicates,
+    generateContentHash,
+    testConnection as testOpenAIConnection
+} from '../services/openai';
+
+// --- ADMIN SETTINGS ---
+
+// GET /api/admin/settings/:key - Get a setting value
+router.get('/settings/:key', async (req, res) => {
+    try {
+        const { key } = req.params;
+
+        // Don't return API key value directly
+        if (key === 'openai_api_key') {
+            const { data } = await supabase
+                .from('admin_settings')
+                .select('setting_value')
+                .eq('setting_key', key)
+                .single();
+
+            return res.json({
+                key,
+                isConfigured: !!(data?.setting_value),
+                value: data?.setting_value ? '••••••••' : null
+            });
+        }
+
+        const { data, error } = await supabase
+            .from('admin_settings')
+            .select('*')
+            .eq('setting_key', key)
+            .single();
+
+        if (error && error.code !== 'PGRST116') throw error;
+        res.json(data || { key, value: null });
+    } catch (error) {
+        console.error('Error fetching setting:', error);
+        res.status(500).json({ error: 'Failed to fetch setting' });
+    }
+});
+
+// PUT /api/admin/settings/:key - Update a setting
+router.put('/settings/:key', async (req, res) => {
+    try {
+        const { key } = req.params;
+        const { value } = req.body;
+        const userId = (req as any).user?.id;
+
+        const { data, error } = await supabase
+            .from('admin_settings')
+            .upsert({
+                setting_key: key,
+                setting_value: value,
+                is_encrypted: key === 'openai_api_key',
+                updated_at: new Date().toISOString(),
+                updated_by: userId
+            }, { onConflict: 'setting_key' })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Return masked value for sensitive keys
+        if (key === 'openai_api_key') {
+            return res.json({
+                success: true,
+                isConfigured: !!value
+            });
+        }
+
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating setting:', error);
+        res.status(500).json({ error: 'Failed to update setting' });
+    }
+});
+
+// POST /api/admin/settings/test-openai - Test OpenAI connection
+router.post('/settings/test-openai', async (req, res) => {
+    try {
+        const isConnected = await testOpenAIConnection();
+        res.json({ success: isConnected });
+    } catch (error: any) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// --- AI QUESTION GENERATION ---
+
+// POST /api/admin/questions/generate-ai - Generate questions using AI
+router.post('/questions/generate-ai', async (req, res) => {
+    try {
+        const {
+            topic_id,
+            concept_ids,
+            language_ids,
+            difficulty_distribution,
+            count,
+            custom_instructions
+        } = req.body;
+
+        // Validate inputs
+        if (!topic_id || !concept_ids?.length || !language_ids?.length) {
+            return res.status(400).json({
+                error: 'topic_id, concept_ids, and language_ids are required'
+            });
+        }
+
+        // Fetch topic info
+        const { data: topic, error: topicError } = await supabase
+            .from('topics')
+            .select('id, name, subject_id')
+            .eq('id', topic_id)
+            .single();
+
+        if (topicError || !topic) {
+            return res.status(404).json({ error: 'Topic not found' });
+        }
+
+        // Fetch concepts
+        const { data: concepts } = await supabase
+            .from('concepts')
+            .select('id, name, description')
+            .in('id', concept_ids);
+
+        // Fetch languages
+        const { data: languages } = await supabase
+            .from('languages')
+            .select('id, code, name')
+            .in('id', language_ids);
+
+        if (!concepts?.length || !languages?.length) {
+            return res.status(400).json({ error: 'Invalid concepts or languages' });
+        }
+
+        // Fetch existing questions for duplicate prevention
+        const { data: existingQuestions } = await supabase
+            .from('questions')
+            .select('id')
+            .eq('topic_id', topic_id)
+            .limit(50);
+
+        let existingTexts: string[] = [];
+        if (existingQuestions?.length) {
+            const { data: translations } = await supabase
+                .from('question_translations')
+                .select('question_text')
+                .in('question_id', existingQuestions.map(q => q.id))
+                .limit(50);
+            existingTexts = translations?.map(t => t.question_text) || [];
+        }
+
+        // Generate questions
+        const result = await aiGenerateQuestions({
+            topicName: topic.name,
+            concepts: concepts,
+            languages: languages,
+            difficultyDistribution: difficulty_distribution || { easy: 30, medium: 50, hard: 20 },
+            count: count || 10,
+            customInstructions: custom_instructions,
+            existingQuestions: existingTexts
+        });
+
+        // Process and save generated questions
+        const savedQuestions: any[] = [];
+        const warnings: string[] = [];
+        const primaryLanguage = languages.find(l => l.code === 'en') || languages[0];
+        const primaryQuestions = result.questions[primaryLanguage.code] || [];
+
+        for (let i = 0; i < primaryQuestions.length; i++) {
+            const primaryQ = primaryQuestions[i];
+
+            // Check for duplicates
+            const duplicates = await checkForDuplicates(primaryQ.question_text, topic_id);
+            if (duplicates.length > 0) {
+                warnings.push(`Question ${i + 1} may be similar to existing question: "${duplicates[0].questionText.substring(0, 50)}..."`);
+            }
+
+            // Create question
+            const contentHash = generateContentHash(primaryQ.question_text);
+            const { data: newQuestion, error: qError } = await supabase
+                .from('questions')
+                .insert({
+                    topic_id,
+                    difficulty: primaryQ.difficulty,
+                    correct_answer_index: primaryQ.correct_answer_index,
+                    is_ai_generated: true,
+                    is_verified: false,
+                    content_hash: contentHash,
+                    is_active: true
+                })
+                .select()
+                .single();
+
+            if (qError || !newQuestion) {
+                warnings.push(`Failed to save question ${i + 1}`);
+                continue;
+            }
+
+            // Create translations for all languages
+            for (const lang of languages) {
+                const langQuestions = result.questions[lang.code];
+                if (!langQuestions || !langQuestions[i]) continue;
+
+                const langQ = langQuestions[i];
+                await supabase.from('question_translations').insert({
+                    question_id: newQuestion.id,
+                    language_id: lang.id,
+                    question_text: langQ.question_text,
+                    options: langQ.options,
+                    explanation: langQ.explanation
+                });
+            }
+
+            // Link concepts
+            const conceptsToLink = primaryQ.concept_ids?.length
+                ? primaryQ.concept_ids
+                : concept_ids.slice(0, 2); // Default to first 2 selected concepts
+
+            for (let j = 0; j < conceptsToLink.length; j++) {
+                await supabase.from('question_concepts').insert({
+                    question_id: newQuestion.id,
+                    concept_id: conceptsToLink[j],
+                    is_primary: j === 0
+                });
+            }
+
+            savedQuestions.push(newQuestion);
+        }
+
+        res.json({
+            success: true,
+            generated: savedQuestions.length,
+            requested: count || 10,
+            question_ids: savedQuestions.map(q => q.id),
+            warnings
+        });
+    } catch (error: any) {
+        console.error('Error generating AI questions:', error);
+        res.status(500).json({ error: error.message || 'Failed to generate questions' });
+    }
+});
+
+// POST /api/admin/questions/:id/translate - Add translation to existing question
+router.post('/questions/:id/translate', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { language_id } = req.body;
+
+        if (!language_id) {
+            return res.status(400).json({ error: 'language_id is required' });
+        }
+
+        // Check if translation already exists
+        const { data: existing } = await supabase
+            .from('question_translations')
+            .select('id')
+            .eq('question_id', id)
+            .eq('language_id', language_id)
+            .single();
+
+        if (existing) {
+            return res.status(400).json({ error: 'Translation already exists for this language' });
+        }
+
+        // Get source translation (prefer English)
+        const { data: sourceTranslation } = await supabase
+            .from('question_translations')
+            .select('*, language:languages(code, name)')
+            .eq('question_id', id)
+            .order('language_id')
+            .limit(1)
+            .single();
+
+        if (!sourceTranslation) {
+            return res.status(404).json({ error: 'No source translation found' });
+        }
+
+        // Get target language
+        const { data: targetLang } = await supabase
+            .from('languages')
+            .select('id, code, name')
+            .eq('id', language_id)
+            .single();
+
+        if (!targetLang) {
+            return res.status(404).json({ error: 'Target language not found' });
+        }
+
+        // Translate using AI
+        const translated = await aiTranslateQuestion({
+            questionText: sourceTranslation.question_text,
+            options: sourceTranslation.options,
+            explanation: sourceTranslation.explanation || '',
+            targetLanguage: { code: targetLang.code, name: targetLang.name }
+        });
+
+        // Save translation
+        const { data: newTranslation, error } = await supabase
+            .from('question_translations')
+            .insert({
+                question_id: id,
+                language_id,
+                question_text: translated.question_text,
+                options: translated.options,
+                explanation: translated.explanation
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({
+            success: true,
+            translation: newTranslation
+        });
+    } catch (error: any) {
+        console.error('Error translating question:', error);
+        res.status(500).json({ error: error.message || 'Failed to translate question' });
+    }
+});
+
+// POST /api/admin/questions/:id/suggest-concepts - AI suggests concepts for question
+router.post('/questions/:id/suggest-concepts', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Get question with translation
+        const { data: question } = await supabase
+            .from('questions')
+            .select('id, topic_id')
+            .eq('id', id)
+            .single();
+
+        if (!question) {
+            return res.status(404).json({ error: 'Question not found' });
+        }
+
+        const { data: translation } = await supabase
+            .from('question_translations')
+            .select('question_text, options')
+            .eq('question_id', id)
+            .limit(1)
+            .single();
+
+        if (!translation) {
+            return res.status(404).json({ error: 'Question translation not found' });
+        }
+
+        // Get available concepts for this topic
+        const { data: availableConcepts } = await supabase
+            .from('concepts')
+            .select('id, name, description')
+            .eq('topic_id', question.topic_id)
+            .eq('is_active', true);
+
+        if (!availableConcepts?.length) {
+            return res.json({ suggestions: [], message: 'No concepts available for this topic' });
+        }
+
+        // Get AI suggestions
+        const suggestions = await aiSuggestConcepts(
+            translation.question_text,
+            translation.options,
+            availableConcepts
+        );
+
+        res.json({
+            suggestions: suggestions.map(s => ({
+                ...s,
+                concept: availableConcepts.find(c => c.id === s.concept_id)
+            }))
+        });
+    } catch (error: any) {
+        console.error('Error suggesting concepts:', error);
+        res.status(500).json({ error: error.message || 'Failed to suggest concepts' });
+    }
+});
+
+// PUT /api/admin/questions/:id/verify - Mark AI question as verified
+router.put('/questions/:id/verify', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const { error } = await supabase
+            .from('questions')
+            .update({ is_verified: true })
+            .eq('id', id);
+
+        if (error) throw error;
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error verifying question:', error);
+        res.status(500).json({ error: 'Failed to verify question' });
+    }
+});
+
 export default router;
+

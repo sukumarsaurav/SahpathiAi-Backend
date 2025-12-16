@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { updateConceptStatsRealtime } from '../services/personalization';
 
 const router = Router();
 
@@ -430,4 +431,414 @@ router.post('/:id/retry', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/mistakes/sets
+ * Get grouped mistake sets with smart recommendations
+ */
+router.get('/sets', authenticate, async (req, res) => {
+    try {
+        const userId = req.user!.id;
+
+        // Get all user mistakes
+        const { data: mistakes, error } = await supabaseAdmin
+            .from('user_mistakes')
+            .select(`
+                id,
+                question_id,
+                retry_count,
+                consecutive_correct,
+                mastery_status,
+                difficulty,
+                created_at
+            `)
+            .eq('user_id', userId);
+
+        if (error) throw error;
+        if (!mistakes || mistakes.length === 0) {
+            return res.json({
+                sets: [],
+                by_difficulty: {},
+                by_recency: { this_week: 0, older: 0 },
+                recommendations: [],
+                total: 0
+            });
+        }
+
+        // Group by retry level (Set 1: 1 mistake, Set 2: 2 mistakes, Set 3+: 3+)
+        const sets = [
+            { level: 1, label: 'First Mistakes', mistakes: [] as any[], mastered: 0 },
+            { level: 2, label: 'Persistent Errors', mistakes: [] as any[], mastered: 0 },
+            { level: 3, label: 'Chronic Issues', mistakes: [] as any[], mastered: 0 }
+        ];
+
+        for (const m of mistakes) {
+            const level = Math.min(m.retry_count || 1, 3);
+            const setIndex = level - 1;
+            sets[setIndex].mistakes.push(m);
+            if (m.mastery_status === 'mastered') {
+                sets[setIndex].mastered++;
+            }
+        }
+
+        // Group by difficulty
+        const byDifficulty: Record<string, { count: number; mastered: number }> = {
+            easy: { count: 0, mastered: 0 },
+            medium: { count: 0, mastered: 0 },
+            hard: { count: 0, mastered: 0 }
+        };
+
+        for (const m of mistakes) {
+            const diff = m.difficulty || 'medium';
+            if (byDifficulty[diff]) {
+                byDifficulty[diff].count++;
+                if (m.mastery_status === 'mastered') byDifficulty[diff].mastered++;
+            }
+        }
+
+        // Group by recency
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        const thisWeek = mistakes.filter(m => new Date(m.created_at) >= weekAgo).length;
+        const older = mistakes.length - thisWeek;
+
+        // Generate smart recommendations
+        const recommendations: string[] = [];
+
+        // Check which set needs focus
+        const set2Progress = sets[1].mistakes.length > 0
+            ? Math.round((sets[1].mastered / sets[1].mistakes.length) * 100)
+            : 100;
+        const set1Progress = sets[0].mistakes.length > 0
+            ? Math.round((sets[0].mastered / sets[0].mistakes.length) * 100)
+            : 100;
+
+        if (set1Progress >= 80 && sets[1].mistakes.length > 0) {
+            recommendations.push("You've mastered Set 1, time to tackle Set 2!");
+        } else if (sets[1].mistakes.length > 0 && set2Progress < 50) {
+            recommendations.push("Focus on Set 2 - these are your persistent problem areas");
+        }
+
+        if (sets[2].mistakes.length >= 3) {
+            recommendations.push(`${sets[2].mistakes.length} chronic issues need your attention`);
+        }
+
+        // Get concept-based recommendation
+        const questionIds = mistakes.map(m => m.question_id);
+        const { data: conceptData } = await supabaseAdmin
+            .from('question_concepts')
+            .select('concept_id')
+            .in('question_id', questionIds);
+
+        if (conceptData && conceptData.length > 0) {
+            // Count mistakes per concept
+            const conceptCounts = new Map<string, number>();
+            for (const qc of conceptData) {
+                conceptCounts.set(qc.concept_id, (conceptCounts.get(qc.concept_id) || 0) + 1);
+            }
+
+            // Find most problematic concept
+            let maxConceptId = '';
+            let maxCount = 0;
+            for (const [id, count] of conceptCounts) {
+                if (count > maxCount) {
+                    maxConceptId = id;
+                    maxCount = count;
+                }
+            }
+
+            if (maxCount >= 3) {
+                const { data: concept } = await supabaseAdmin
+                    .from('concepts')
+                    .select('name')
+                    .eq('id', maxConceptId)
+                    .single();
+
+                if (concept) {
+                    recommendations.push(
+                        `${maxCount} mistakes in '${concept.name}' - review this concept first`
+                    );
+                }
+            }
+        }
+
+        res.json({
+            sets: sets.map(s => ({
+                level: s.level,
+                label: s.label,
+                count: s.mistakes.length,
+                mastered: s.mastered,
+                progress: s.mistakes.length > 0
+                    ? Math.round((s.mastered / s.mistakes.length) * 100)
+                    : 0
+            })),
+            by_difficulty: byDifficulty,
+            by_recency: { this_week: thisWeek, older },
+            recommendations,
+            total: mistakes.length
+        });
+    } catch (error) {
+        console.error('Get mistake sets error:', error);
+        res.status(500).json({ error: 'Failed to fetch mistake sets' });
+    }
+});
+
+/**
+ * GET /api/mistakes/by-concept
+ * Get mistakes grouped by concept with accuracy
+ */
+router.get('/by-concept', authenticate, async (req, res) => {
+    try {
+        const userId = req.user!.id;
+
+        // Get all user mistakes
+        const { data: mistakes } = await supabaseAdmin
+            .from('user_mistakes')
+            .select('question_id, mastery_status')
+            .eq('user_id', userId);
+
+        if (!mistakes || mistakes.length === 0) {
+            return res.json({ concepts: [] });
+        }
+
+        const questionIds = mistakes.map(m => m.question_id);
+
+        // Get question-concept mappings
+        const { data: questionConcepts } = await supabaseAdmin
+            .from('question_concepts')
+            .select(`
+                question_id,
+                concept:concepts(id, name, topic:topics(name, subject:subjects(name, icon, color)))
+            `)
+            .in('question_id', questionIds);
+
+        if (!questionConcepts || questionConcepts.length === 0) {
+            return res.json({ concepts: [] });
+        }
+
+        // Aggregate by concept
+        const conceptMap = new Map<string, {
+            id: string;
+            name: string;
+            topic_name: string;
+            subject_name: string;
+            subject_icon: string;
+            subject_color: string;
+            total: number;
+            mastered: number;
+        }>();
+
+        for (const qc of questionConcepts) {
+            const concept = qc.concept as any;
+            if (!concept) continue;
+
+            const mistake = mistakes.find(m => m.question_id === qc.question_id);
+            const existing = conceptMap.get(concept.id) || {
+                id: concept.id,
+                name: concept.name,
+                topic_name: concept.topic?.name || '',
+                subject_name: concept.topic?.subject?.name || '',
+                subject_icon: concept.topic?.subject?.icon || '📚',
+                subject_color: concept.topic?.subject?.color || '#3b82f6',
+                total: 0,
+                mastered: 0
+            };
+
+            existing.total++;
+            if (mistake?.mastery_status === 'mastered') existing.mastered++;
+            conceptMap.set(concept.id, existing);
+        }
+
+        // Convert to array and sort by total mistakes
+        const concepts = Array.from(conceptMap.values())
+            .sort((a, b) => b.total - a.total)
+            .map(c => ({
+                ...c,
+                accuracy: c.total > 0 ? Math.round((c.mastered / c.total) * 100) : 0
+            }));
+
+        res.json({ concepts });
+    } catch (error) {
+        console.error('Get mistakes by concept error:', error);
+        res.status(500).json({ error: 'Failed to fetch concept mistakes' });
+    }
+});
+
+/**
+ * POST /api/mistakes/:id/practice
+ * Practice a mistake question (mastery tracking, NO removal from list)
+ */
+router.post('/:id/practice', authenticate, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { is_correct, time_taken } = req.body;
+        const userId = req.user!.id;
+
+        // Get current mistake state
+        const { data: current, error: fetchError } = await supabaseAdmin
+            .from('user_mistakes')
+            .select('*, question:questions(id, difficulty)')
+            .eq('id', id)
+            .eq('user_id', userId)
+            .single();
+
+        if (fetchError || !current) {
+            return res.status(404).json({ error: 'Mistake not found' });
+        }
+
+        // Calculate new values
+        const consecutiveCorrect = is_correct
+            ? (current.consecutive_correct || 0) + 1
+            : 0; // Reset streak on wrong
+
+        const totalCorrect = is_correct
+            ? (current.total_correct || 0) + 1
+            : (current.total_correct || 0);
+
+        const retryCount = (current.retry_count || 0) + 1;
+
+        // Mastery: 3 consecutive correct answers
+        const isMastered = consecutiveCorrect >= 3;
+        const masteryStatus = isMastered
+            ? 'mastered'
+            : consecutiveCorrect > 0
+                ? 'practicing'
+                : 'not_started';
+
+        // Calculate next review date for mastered questions (spaced repetition)
+        let nextReviewDate: string | null = null;
+        if (isMastered) {
+            const reviewDate = new Date();
+            reviewDate.setDate(reviewDate.getDate() + 7); // Review in 1 week
+            nextReviewDate = reviewDate.toISOString().split('T')[0];
+        }
+
+        // Calculate average time
+        const prevAvg = current.time_taken_avg || 0;
+        const prevCount = current.total_correct || 0;
+        const newAvg = prevCount > 0
+            ? Math.round((prevAvg * prevCount + time_taken) / (prevCount + 1))
+            : time_taken;
+
+        // Update mistake - DOES NOT set is_resolved
+        const { data: updated, error: updateError } = await supabaseAdmin
+            .from('user_mistakes')
+            .update({
+                retry_count: retryCount,
+                consecutive_correct: consecutiveCorrect,
+                total_correct: totalCorrect,
+                mastery_status: masteryStatus,
+                next_review_date: nextReviewDate,
+                last_attempted: new Date().toISOString(),
+                last_correct_at: is_correct ? new Date().toISOString() : current.last_correct_at,
+                time_taken_avg: time_taken ? newAvg : current.time_taken_avg,
+                difficulty: current.difficulty || (current.question as any)?.difficulty
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (updateError) throw updateError;
+
+        // Update concept stats if correct (for personalization)
+        if (is_correct && current.question_id) {
+            await updateConceptStatsRealtime(userId, current.question_id, is_correct, time_taken || 0);
+        }
+
+        res.json({
+            ...updated,
+            consecutive_correct: consecutiveCorrect,
+            mastery_status: masteryStatus,
+            is_mastered: isMastered,
+            progress: isMastered
+                ? 'Mastered! Will review in 1 week.'
+                : `${consecutiveCorrect}/3 correct to master`
+        });
+    } catch (error) {
+        console.error('Practice mistake error:', error);
+        res.status(500).json({ error: 'Failed to record practice' });
+    }
+});
+
+/**
+ * GET /api/mistakes/set/:level
+ * Get all mistakes for a specific set level (1, 2, or 3+)
+ */
+router.get('/set/:level', authenticate, async (req, res) => {
+    try {
+        const { level } = req.params;
+        const userId = req.user!.id;
+        const preferredLanguageId = req.user!.preferred_language_id;
+        const levelNum = parseInt(level);
+
+        // Build query based on level
+        let query = supabaseAdmin
+            .from('user_mistakes')
+            .select('*')
+            .eq('user_id', userId);
+
+        if (levelNum === 1) {
+            query = query.eq('retry_count', 1);
+        } else if (levelNum === 2) {
+            query = query.eq('retry_count', 2);
+        } else {
+            query = query.gte('retry_count', 3);
+        }
+
+        const { data: mistakes, error } = await query.order('created_at', { ascending: false });
+
+        if (error) throw error;
+        if (!mistakes || mistakes.length === 0) return res.json([]);
+
+        // Get question details with translations
+        const questionIds = mistakes.map(m => m.question_id);
+
+        const { data: questions } = await supabaseAdmin
+            .from('questions')
+            .select('id, topic_id, correct_answer_index, difficulty')
+            .in('id', questionIds);
+
+        const questionMap = new Map(questions?.map(q => [q.id, q]) || []);
+
+        // Get translations
+        const { data: translations } = await supabaseAdmin
+            .from('question_translations')
+            .select('question_id, language_id, question_text, options, explanation')
+            .in('question_id', questionIds);
+
+        const translationMap = new Map<string, any>();
+        for (const t of translations || []) {
+            const existing = translationMap.get(t.question_id);
+            if (!existing || t.language_id === preferredLanguageId) {
+                translationMap.set(t.question_id, t);
+            }
+        }
+
+        // Format response
+        const formatted = mistakes.map(m => {
+            const question = questionMap.get(m.question_id);
+            const translation = translationMap.get(m.question_id);
+
+            return {
+                id: m.id,
+                question_id: m.question_id,
+                question: translation?.question_text || 'Question not available',
+                options: translation?.options || [],
+                explanation: translation?.explanation,
+                correct_answer: question?.correct_answer_index ?? 0,
+                difficulty: question?.difficulty || m.difficulty,
+                retry_count: m.retry_count,
+                consecutive_correct: m.consecutive_correct || 0,
+                mastery_status: m.mastery_status || 'not_started',
+                last_attempted: m.last_attempted
+            };
+        });
+
+        res.json(formatted);
+    } catch (error) {
+        console.error('Get mistake set error:', error);
+        res.status(500).json({ error: 'Failed to fetch mistake set' });
+    }
+});
+
 export default router;
+

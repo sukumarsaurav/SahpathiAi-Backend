@@ -670,4 +670,162 @@ router.get('/daily-stats', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/analytics/weak-areas
+ * Get concepts where user needs improvement
+ * Returns weak concepts with topic and subject info
+ */
+router.get('/weak-areas', authenticate, async (req, res) => {
+    try {
+        const userId = req.user!.id;
+        const { limit = 10 } = req.query;
+
+        // Get weak/developing concepts from user_concept_stats
+        const { data: weakConcepts, error } = await supabaseAdmin
+            .from('user_concept_stats')
+            .select(`
+                id,
+                concept_id,
+                accuracy_rate,
+                proficiency_level,
+                total_attempts,
+                correct_attempts,
+                next_review_date,
+                recent_trend,
+                last_practiced,
+                concept:concepts(
+                    id,
+                    name,
+                    topic:topics(
+                        id,
+                        name,
+                        subject:subjects(id, name, icon, color)
+                    )
+                )
+            `)
+            .eq('user_id', userId)
+            .in('proficiency_level', ['weak', 'developing', 'unknown'])
+            .order('accuracy_rate', { ascending: true })
+            .limit(Number(limit));
+
+        if (error) throw error;
+
+        // Also get concepts due for review (spaced repetition)
+        const today = new Date().toISOString().split('T')[0];
+        const { data: dueForReview } = await supabaseAdmin
+            .from('user_concept_stats')
+            .select(`
+                id,
+                concept_id,
+                accuracy_rate,
+                proficiency_level,
+                total_attempts,
+                correct_attempts,
+                next_review_date,
+                recent_trend,
+                last_practiced,
+                concept:concepts(
+                    id,
+                    name,
+                    topic:topics(
+                        id,
+                        name,
+                        subject:subjects(id, name, icon, color)
+                    )
+                )
+            `)
+            .eq('user_id', userId)
+            .not('proficiency_level', 'in', '(weak,developing,unknown)')
+            .lte('next_review_date', today)
+            .order('next_review_date', { ascending: true })
+            .limit(5);
+
+        // Format the response
+        const formatConcept = (item: any) => {
+            const concept = item.concept;
+            const topic = concept?.topic;
+            const subject = topic?.subject;
+
+            return {
+                id: item.id,
+                concept_id: item.concept_id,
+                concept_name: concept?.name || 'Unknown Concept',
+                topic_id: topic?.id,
+                topic_name: topic?.name || 'Unknown Topic',
+                subject_id: subject?.id,
+                subject_name: subject?.name || 'Unknown Subject',
+                subject_icon: subject?.icon || '📚',
+                subject_color: subject?.color || '#3b82f6',
+                accuracy_rate: Math.round(item.accuracy_rate || 0),
+                proficiency_level: item.proficiency_level,
+                total_attempts: item.total_attempts,
+                correct_attempts: item.correct_attempts,
+                next_review_date: item.next_review_date,
+                recent_trend: item.recent_trend,
+                last_practiced: item.last_practiced
+            };
+        };
+
+        const weakAreasFormatted = (weakConcepts || []).map(formatConcept);
+        const dueForReviewFormatted = (dueForReview || []).map(formatConcept);
+
+        res.json({
+            weak_areas: weakAreasFormatted,
+            due_for_review: dueForReviewFormatted,
+            total_weak: weakAreasFormatted.length,
+            total_due: dueForReviewFormatted.length
+        });
+    } catch (error) {
+        console.error('Get weak areas error:', error);
+        res.status(500).json({ error: 'Failed to fetch weak areas' });
+    }
+});
+
+/**
+ * GET /api/analytics/concept-progress
+ * Get overall concept mastery progress
+ */
+router.get('/concept-progress', authenticate, async (req, res) => {
+    try {
+        const userId = req.user!.id;
+
+        // Get proficiency level counts
+        const { data: stats } = await supabaseAdmin
+            .from('user_concept_stats')
+            .select('proficiency_level')
+            .eq('user_id', userId);
+
+        const levelCounts = {
+            mastered: 0,
+            strong: 0,
+            medium: 0,
+            developing: 0,
+            weak: 0,
+            unknown: 0
+        };
+
+        for (const stat of stats || []) {
+            const level = stat.proficiency_level as keyof typeof levelCounts;
+            if (level in levelCounts) {
+                levelCounts[level]++;
+            }
+        }
+
+        const totalConcepts = stats?.length || 0;
+        const masteredPercent = totalConcepts > 0
+            ? Math.round(((levelCounts.mastered + levelCounts.strong) / totalConcepts) * 100)
+            : 0;
+
+        res.json({
+            total_concepts: totalConcepts,
+            mastered_percent: masteredPercent,
+            levels: levelCounts
+        });
+    } catch (error) {
+        console.error('Get concept progress error:', error);
+        res.status(500).json({ error: 'Failed to fetch concept progress' });
+    }
+});
+
 export default router;
+

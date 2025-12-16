@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { updateConceptStatsRealtime, calculateConceptProficiency } from '../services/personalization';
 
 const router = Router();
 
@@ -248,6 +249,12 @@ router.post('/:testId/submit', authenticate, async (req, res) => {
                     });
                 }
             }
+
+            // Real-time: Update concept stats (non-blocking)
+            if (!isSkipped && testQuestion?.question_id) {
+                updateConceptStatsRealtime(req.user!.id, testQuestion.question_id, isCorrect, answer.time_taken || 0)
+                    .catch(err => console.error('Concept stats update error:', err));
+            }
         }
 
         // Update test status
@@ -339,6 +346,19 @@ router.post('/:testId/submit', authenticate, async (req, res) => {
         } catch (referralError) {
             // Log but don't fail the test submission
             console.log('[Referral] Error or no pending referral:', referralError);
+        }
+
+        // Batch: Calculate concept proficiency (non-blocking)
+        // Get question_ids from answers by querying the custom_test_questions
+        const { data: questionData } = await supabaseAdmin
+            .from('custom_test_questions')
+            .select('question_id')
+            .eq('custom_test_id', testId);
+
+        const questionIds = questionData?.map(q => q.question_id).filter(Boolean) || [];
+        if (questionIds.length > 0) {
+            calculateConceptProficiency(req.user!.id, questionIds)
+                .catch(err => console.error('Proficiency calculation error:', err));
         }
 
         res.json({

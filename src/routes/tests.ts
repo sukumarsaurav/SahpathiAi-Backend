@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate, optionalAuth } from '../middleware/auth';
+import { updateConceptStatsRealtime, calculateConceptProficiency } from '../services/personalization';
 
 const router = Router();
 
@@ -329,6 +330,12 @@ router.post('/:id/submit', authenticate, async (req, res) => {
                     selected_option: answer.selected_option
                 });
             }
+
+            // Real-time: Update concept stats (non-blocking)
+            if (!isSkipped) {
+                updateConceptStatsRealtime(req.user!.id, answer.question_id, isCorrect, answer.time_taken || 0)
+                    .catch(err => console.error('Concept stats update error:', err));
+            }
         }
 
         // Add mistakes
@@ -375,6 +382,13 @@ router.post('/:id/submit', authenticate, async (req, res) => {
 
         // Update user stats
         await supabaseAdmin.rpc('update_user_stats', { user_id: req.user!.id });
+
+        // Batch: Calculate concept proficiency for all answered questions
+        const questionIds = answers.map((a: any) => a.question_id).filter(Boolean);
+        if (questionIds.length > 0) {
+            calculateConceptProficiency(req.user!.id, questionIds)
+                .catch(err => console.error('Proficiency calculation error:', err));
+        }
 
         // Check and complete referral if this is the user's first test
         try {

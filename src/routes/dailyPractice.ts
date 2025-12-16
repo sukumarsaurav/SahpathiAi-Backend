@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { updateConceptStatsRealtime, calculateConceptProficiency } from '../services/personalization';
 
 const router = Router();
 
@@ -186,7 +187,13 @@ router.get('/stats', authenticate, async (req, res) => {
 
 /**
  * POST /api/daily-practice/generate
- * Generate personalized practice session
+ * Generate personalized practice session with smart question selection
+ * 
+ * Categories:
+ * - Mistakes (30%): Unresolved mistakes + previously skipped questions
+ * - Time-consuming (10%): Questions where user took longer than average
+ * - Strong areas (20%): High accuracy concepts due for review (spaced repetition)
+ * - New topics (40%): Concepts user hasn't attempted yet
  */
 router.post('/generate', authenticate, async (req, res) => {
     try {
@@ -194,45 +201,200 @@ router.post('/generate', authenticate, async (req, res) => {
         const userId = req.user!.id;
 
         // Calculate question counts per category
-        const newTopicsCount = Math.round(totalQuestions * (config.newTopics / 100));
-        const strongAreasCount = Math.round(totalQuestions * (config.strongAreas / 100));
         const mistakesCount = Math.round(totalQuestions * (config.mistakes / 100));
-        const timeConsumingCount = totalQuestions - newTopicsCount - strongAreasCount - mistakesCount;
+        const timeConsumingCount = Math.round(totalQuestions * (config.timeConsuming / 100));
+        const strongAreasCount = Math.round(totalQuestions * (config.strongAreas / 100));
+        const newTopicsCount = totalQuestions - mistakesCount - timeConsumingCount - strongAreasCount;
 
-        const questions: any[] = [];
+        const questions: { question_id: string; category: string }[] = [];
+        const usedQuestionIds = new Set<string>();
 
-        // Get mistake questions
+        // Helper to add questions without duplicates
+        const addQuestions = (questionIds: string[], category: string, limit: number) => {
+            let added = 0;
+            for (const qId of questionIds) {
+                if (added >= limit) break;
+                if (!usedQuestionIds.has(qId)) {
+                    questions.push({ question_id: qId, category });
+                    usedQuestionIds.add(qId);
+                    added++;
+                }
+            }
+            return added;
+        };
+
+        // 1. MISTAKES: Unresolved mistakes + previously skipped questions
         if (mistakesCount > 0) {
+            // Get unresolved mistakes
             const { data: mistakes } = await supabaseAdmin
                 .from('user_mistakes')
                 .select('question_id')
                 .eq('user_id', userId)
                 .eq('is_resolved', false)
-                .limit(mistakesCount);
+                .order('created_at', { ascending: false })
+                .limit(mistakesCount * 2); // Get extra for fallback
 
-            mistakes?.forEach(m => {
-                questions.push({ question_id: m.question_id, category: 'mistake' });
-            });
+            const mistakeIds = mistakes?.map(m => m.question_id) || [];
+            let addedMistakes = addQuestions(mistakeIds, 'mistake', mistakesCount);
+
+            // Also include skipped questions from previous sessions
+            if (addedMistakes < mistakesCount) {
+                const needed = mistakesCount - addedMistakes;
+                const { data: skipped } = await supabaseAdmin
+                    .from('daily_practice_questions')
+                    .select('question_id, session:daily_practice_sessions!inner(user_id)')
+                    .eq('is_skipped', true)
+                    .eq('session.user_id', userId)
+                    .order('answered_at', { ascending: false })
+                    .limit(needed * 2);
+
+                const skippedIds = skipped?.map(s => s.question_id) || [];
+                addQuestions(skippedIds, 'mistake', needed);
+            }
         }
 
-        // Get random questions for other categories
+        // 2. TIME-CONSUMING: Questions where user took significantly longer
+        if (timeConsumingCount > 0) {
+            // Get user's average time per question
+            const { data: avgData } = await supabaseAdmin
+                .from('user_answers')
+                .select('time_taken_seconds')
+                .eq('user_id', userId)
+                .not('time_taken_seconds', 'is', null);
+
+            const times = avgData?.map(a => a.time_taken_seconds).filter(t => t > 0) || [];
+            const avgTime = times.length > 0 ? times.reduce((a, b) => a + b, 0) / times.length : 60;
+            const slowThreshold = avgTime * 1.5; // Questions taking 1.5x longer than average
+
+            // Get questions where user took longer than threshold
+            const { data: slowQuestions } = await supabaseAdmin
+                .from('user_answers')
+                .select('question_id')
+                .eq('user_id', userId)
+                .gt('time_taken_seconds', slowThreshold)
+                .order('time_taken_seconds', { ascending: false })
+                .limit(timeConsumingCount * 3);
+
+            const slowIds = slowQuestions?.map(s => s.question_id) || [];
+            addQuestions(slowIds, 'time_consuming', timeConsumingCount);
+        }
+
+        // 3. STRONG AREAS: High proficiency concepts due for review (spaced repetition)
+        if (strongAreasCount > 0) {
+            const today = new Date().toISOString().split('T')[0];
+
+            // Get concepts with high proficiency that are due for review
+            const { data: strongConcepts } = await supabaseAdmin
+                .from('user_concept_stats')
+                .select('concept_id')
+                .eq('user_id', userId)
+                .in('proficiency_level', ['strong', 'mastered', 'medium'])
+                .lte('next_review_date', today)
+                .order('next_review_date', { ascending: true })
+                .limit(strongAreasCount * 2);
+
+            if (strongConcepts && strongConcepts.length > 0) {
+                const conceptIds = strongConcepts.map(c => c.concept_id);
+
+                // Get questions linked to these concepts
+                const { data: conceptQuestions } = await supabaseAdmin
+                    .from('question_concepts')
+                    .select('question_id')
+                    .in('concept_id', conceptIds)
+                    .limit(strongAreasCount * 3);
+
+                const strongIds = conceptQuestions?.map(q => q.question_id) || [];
+                addQuestions(strongIds, 'strong_area', strongAreasCount);
+            }
+        }
+
+        // 4. NEW TOPICS: Concepts user hasn't attempted yet
+        if (newTopicsCount > 0) {
+            // Get concepts user has already attempted
+            const { data: attemptedConcepts } = await supabaseAdmin
+                .from('user_concept_stats')
+                .select('concept_id')
+                .eq('user_id', userId);
+
+            const attemptedConceptIds = attemptedConcepts?.map(c => c.concept_id) || [];
+
+            // Build query for questions linked to unattempted concepts
+            let newTopicsQuery = supabaseAdmin
+                .from('question_concepts')
+                .select('question_id, concept_id')
+                .limit(newTopicsCount * 3);
+
+            if (attemptedConceptIds.length > 0) {
+                // Get concepts NOT in the attempted list
+                const { data: newConcepts } = await supabaseAdmin
+                    .from('concepts')
+                    .select('id')
+                    .not('id', 'in', `(${attemptedConceptIds.join(',')})`)
+                    .limit(20);
+
+                if (newConcepts && newConcepts.length > 0) {
+                    const newConceptIds = newConcepts.map(c => c.id);
+                    const { data: newQuestions } = await supabaseAdmin
+                        .from('question_concepts')
+                        .select('question_id')
+                        .in('concept_id', newConceptIds)
+                        .limit(newTopicsCount * 3);
+
+                    const newIds = newQuestions?.map(q => q.question_id) || [];
+                    addQuestions(newIds, 'new_topic', newTopicsCount);
+                }
+            } else {
+                // User hasn't attempted anything, get any concept-linked questions
+                const { data: anyQuestions } = await supabaseAdmin
+                    .from('question_concepts')
+                    .select('question_id')
+                    .limit(newTopicsCount * 3);
+
+                const anyIds = anyQuestions?.map(q => q.question_id) || [];
+                addQuestions(anyIds, 'new_topic', newTopicsCount);
+            }
+        }
+
+        // 5. FALLBACK: Fill remaining slots with random questions
         const neededCount = totalQuestions - questions.length;
         if (neededCount > 0) {
-            const { data: randomQuestions } = await supabaseAdmin
+            // Get random questions not already selected
+            const excludeIds = Array.from(usedQuestionIds);
+            let randomQuery = supabaseAdmin
                 .from('questions')
                 .select('id')
                 .eq('is_active', true)
-                .limit(neededCount);
+                .limit(neededCount * 2);
 
-            randomQuestions?.forEach((q, i) => {
-                const category = i < newTopicsCount ? 'new_topic'
-                    : i < newTopicsCount + strongAreasCount ? 'strong_area'
-                        : 'time_consuming';
-                questions.push({ question_id: q.id, category });
-            });
+            if (excludeIds.length > 0) {
+                randomQuery = randomQuery.not('id', 'in', `(${excludeIds.join(',')})`);
+            }
+
+            const { data: randomQuestions } = await randomQuery;
+
+            if (randomQuestions) {
+                // Distribute random questions across categories that need more
+                const categoryShortages = {
+                    new_topic: newTopicsCount - questions.filter(q => q.category === 'new_topic').length,
+                    strong_area: strongAreasCount - questions.filter(q => q.category === 'strong_area').length,
+                    time_consuming: timeConsumingCount - questions.filter(q => q.category === 'time_consuming').length,
+                    mistake: mistakesCount - questions.filter(q => q.category === 'mistake').length
+                };
+
+                let randomIdx = 0;
+                for (const [category, shortage] of Object.entries(categoryShortages)) {
+                    for (let i = 0; i < shortage && randomIdx < randomQuestions.length; i++) {
+                        const q = randomQuestions[randomIdx++];
+                        if (!usedQuestionIds.has(q.id)) {
+                            questions.push({ question_id: q.id, category });
+                            usedQuestionIds.add(q.id);
+                        }
+                    }
+                }
+            }
         }
 
-        // Shuffle questions
+        // Shuffle questions for variety
         questions.sort(() => Math.random() - 0.5);
 
         // Create session
@@ -588,6 +750,273 @@ router.get('/streak', authenticate, async (req, res) => {
     } catch (error) {
         console.error('Get streak error:', error);
         res.status(500).json({ error: 'Failed to fetch streak' });
+    }
+});
+
+/**
+ * GET /api/daily-practice/session/:sessionId/questions
+ * Get ALL questions for a session at once (batch fetch for CustomTest-style flow)
+ */
+router.get('/session/:sessionId/questions', authenticate, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const userId = req.user!.id;
+
+        // Verify session belongs to user
+        const { data: session, error: sessionError } = await supabaseAdmin
+            .from('daily_practice_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .eq('user_id', userId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // Get all questions with their translations
+        const { data: questionItems, error } = await supabaseAdmin
+            .from('daily_practice_questions')
+            .select(`
+                id,
+                question_id,
+                category,
+                order_index,
+                is_answered,
+                is_correct,
+                question:questions(
+                    id,
+                    difficulty,
+                    correct_answer_index,
+                    translations:question_translations(
+                        language_id,
+                        question_text,
+                        options,
+                        explanation,
+                        language:languages(id, code, name, native_name)
+                    )
+                )
+            `)
+            .eq('session_id', sessionId)
+            .order('order_index');
+
+        if (error) throw error;
+
+        // Format questions for frontend
+        const languageId = req.user?.preferred_language_id;
+        const questions = questionItems?.map((item: any) => {
+            const q = item.question;
+            const translation = languageId
+                ? q.translations?.find((t: any) => t.language_id === languageId)
+                : q.translations?.[0];
+
+            return {
+                id: item.id, // This is the daily_practice_questions id
+                question_id: item.question_id,
+                order: item.order_index + 1,
+                category: item.category,
+                difficulty: q.difficulty,
+                question: translation?.question_text || '',
+                options: translation?.options || [],
+                translations: q.translations,
+                // Include previous answer state for resume
+                is_answered: item.is_answered,
+                is_correct: item.is_correct
+            };
+        }) || [];
+
+        res.json({
+            session,
+            questions,
+            totalQuestions: questions.length
+        });
+    } catch (error) {
+        console.error('Get all questions error:', error);
+        res.status(500).json({ error: 'Failed to fetch questions' });
+    }
+});
+
+/**
+ * POST /api/daily-practice/session/:sessionId/submit
+ * Submit ALL answers at once (batch submit for CustomTest-style flow)
+ * Skipped questions (selected_option === null) are treated as mistakes
+ */
+router.post('/session/:sessionId/submit', authenticate, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        const { answers } = req.body; // Array of { question_item_id, selected_option, time_taken }
+        const userId = req.user!.id;
+
+        // Verify session belongs to user and is active
+        const { data: session, error: sessionError } = await supabaseAdmin
+            .from('daily_practice_sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .eq('user_id', userId)
+            .single();
+
+        if (sessionError || !session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        if (session.status === 'completed') {
+            return res.status(400).json({ error: 'Session already completed' });
+        }
+
+        let correctCount = 0;
+        let answeredCount = 0;
+        const mistakesToAdd: any[] = [];
+        const results: any[] = [];
+
+        // Process each answer
+        for (const answer of answers) {
+            const { question_item_id, selected_option, time_taken } = answer;
+
+            // Get question item and correct answer
+            const { data: questionItem } = await supabaseAdmin
+                .from('daily_practice_questions')
+                .select('question_id, category')
+                .eq('id', question_item_id)
+                .single();
+
+            if (!questionItem) continue;
+
+            const { data: question } = await supabaseAdmin
+                .from('questions')
+                .select('correct_answer_index')
+                .eq('id', questionItem.question_id)
+                .single();
+
+            const isSkipped = selected_option === null;
+            const isCorrect = !isSkipped && question?.correct_answer_index === selected_option;
+
+            if (!isSkipped) answeredCount++;
+            if (isCorrect) correctCount++;
+
+            // Update question item
+            await supabaseAdmin
+                .from('daily_practice_questions')
+                .update({
+                    is_answered: !isSkipped,
+                    is_correct: isCorrect,
+                    is_skipped: isSkipped,
+                    time_taken_seconds: time_taken || 0,
+                    answered_at: new Date().toISOString()
+                })
+                .eq('id', question_item_id);
+
+            // Track mistakes (wrong answers AND skipped questions)
+            if (!isCorrect) {
+                mistakesToAdd.push({
+                    user_id: userId,
+                    question_id: questionItem.question_id,
+                    selected_option: selected_option
+                });
+            }
+
+            results.push({
+                question_item_id,
+                question_id: questionItem.question_id,
+                is_correct: isCorrect,
+                is_skipped: isSkipped,
+                correct_answer: question?.correct_answer_index
+            });
+
+            // Real-time: Update concept stats (non-blocking)
+            if (!isSkipped) {
+                updateConceptStatsRealtime(userId, questionItem.question_id, isCorrect, time_taken || 0)
+                    .catch(err => console.error('Concept stats update error:', err));
+            }
+        }
+
+        // Add/update mistakes (including skipped as mistakes)
+        for (const mistake of mistakesToAdd) {
+            const { data: existing } = await supabaseAdmin
+                .from('user_mistakes')
+                .select('id, retry_count')
+                .eq('user_id', mistake.user_id)
+                .eq('question_id', mistake.question_id)
+                .single();
+
+            if (existing) {
+                await supabaseAdmin
+                    .from('user_mistakes')
+                    .update({
+                        retry_count: existing.retry_count + 1,
+                        is_resolved: false,
+                        last_attempted: new Date().toISOString()
+                    })
+                    .eq('id', existing.id);
+            } else {
+                await supabaseAdmin.from('user_mistakes').insert(mistake);
+            }
+        }
+
+        // Update session as completed
+        const { data: updatedSession, error: updateError } = await supabaseAdmin
+            .from('daily_practice_sessions')
+            .update({
+                status: 'completed',
+                questions_answered: answeredCount,
+                correct_answers: correctCount,
+                completed_at: new Date().toISOString()
+            })
+            .eq('id', sessionId)
+            .select()
+            .single();
+
+        if (updateError) throw updateError;
+
+        // Update daily progress
+        const today = new Date().toISOString().split('T')[0];
+        const { data: existingProgress } = await supabaseAdmin
+            .from('daily_progress')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('practice_date', today)
+            .single();
+
+        if (existingProgress) {
+            await supabaseAdmin
+                .from('daily_progress')
+                .update({
+                    questions_completed: existingProgress.questions_completed + answeredCount,
+                    correct_answers: existingProgress.correct_answers + correctCount
+                })
+                .eq('id', existingProgress.id);
+        } else {
+            await supabaseAdmin.from('daily_progress').insert({
+                user_id: userId,
+                practice_date: today,
+                questions_completed: answeredCount,
+                correct_answers: correctCount
+            });
+        }
+
+        // Update user stats
+        await supabaseAdmin.rpc('update_user_stats', { user_id: userId });
+
+        // Batch: Calculate concept proficiency for all answered questions
+        const questionIds = results.map(r => r.question_id).filter(Boolean);
+        if (questionIds.length > 0) {
+            calculateConceptProficiency(userId, questionIds)
+                .catch(err => console.error('Proficiency calculation error:', err));
+        }
+
+        res.json({
+            session: updatedSession,
+            results,
+            summary: {
+                total: answers.length,
+                answered: answeredCount,
+                correct: correctCount,
+                skipped: answers.length - answeredCount,
+                accuracy: answeredCount > 0 ? Math.round((correctCount / answeredCount) * 100) : 0
+            }
+        });
+    } catch (error) {
+        console.error('Batch submit error:', error);
+        res.status(500).json({ error: 'Failed to submit answers' });
     }
 });
 
