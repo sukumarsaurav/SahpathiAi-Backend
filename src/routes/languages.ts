@@ -1,22 +1,29 @@
 import { Router } from 'express';
 import { supabase, supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { cache } from '../utils/cache';
 
 const router = Router();
 
 /**
  * GET /api/languages
- * Get all active languages
+ * Get all active languages (cached 24h)
  */
 router.get('/', async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('languages')
-            .select('*')
-            .eq('is_active', true)
-            .order('display_order');
-
-        if (error) throw error;
+        const data = await cache.getOrSet(
+            cache.KEYS.languages(),
+            cache.TTL.LANGUAGES,
+            async () => {
+                const { data, error } = await supabase
+                    .from('languages')
+                    .select('*')
+                    .eq('is_active', true)
+                    .order('display_order');
+                if (error) throw error;
+                return data;
+            }
+        );
 
         res.json(data);
     } catch (error) {

@@ -2,48 +2,56 @@ import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { authenticate, optionalAuth } from '../middleware/auth';
 import { updateConceptStatsRealtime, calculateConceptProficiency } from '../services/personalization';
+import { cache } from '../utils/cache';
 
 const router = Router();
 
 /**
  * GET /api/tests/categories
- * Get test categories with counts
+ * Get test categories with counts (cached 12h)
  * Query params: examId (optional) - filter test count by exam
  */
 router.get('/categories', optionalAuth, async (req, res) => {
     try {
         const { examId } = req.query;
+        const examIdStr = examId as string | undefined;
 
-        // Fetch categories from DB
-        const { data: categories, error } = await supabaseAdmin
-            .from('test_categories')
-            .select('*')
-            .eq('is_active', true)
-            .order('display_order');
+        const data = await cache.getOrSet(
+            cache.KEYS.testCategories(examIdStr),
+            cache.TTL.TEST_CATEGORIES,
+            async () => {
+                // Fetch categories from DB
+                const { data: categories, error } = await supabaseAdmin
+                    .from('test_categories')
+                    .select('*')
+                    .eq('is_active', true)
+                    .order('display_order');
 
-        if (error) throw error;
+                if (error) throw error;
 
-        // Get counts for each category (filtered by exam if provided)
-        const categoriesWithCounts = await Promise.all(
-            categories.map(async (cat) => {
-                let query = supabaseAdmin
-                    .from('tests')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('test_category_id', cat.id)
-                    .eq('is_active', true);
+                // Get counts for each category (filtered by exam if provided)
+                const categoriesWithCounts = await Promise.all(
+                    categories.map(async (cat) => {
+                        let query = supabaseAdmin
+                            .from('tests')
+                            .select('*', { count: 'exact', head: true })
+                            .eq('test_category_id', cat.id)
+                            .eq('is_active', true);
 
-                // Apply exam filter if provided
-                if (examId && typeof examId === 'string') {
-                    query = query.eq('exam_id', examId);
-                }
+                        if (examIdStr) {
+                            query = query.eq('exam_id', examIdStr);
+                        }
 
-                const { count } = await query;
+                        const { count } = await query;
+                        return { ...cat, testCount: count || 0 };
+                    })
+                );
 
-                return { ...cat, testCount: count || 0 };
-            })
+                return categoriesWithCounts;
+            }
         );
 
-        res.json(categoriesWithCounts);
+        res.json(data);
     } catch (error) {
         console.error('Get categories error:', error);
         res.status(500).json({ error: 'Failed to fetch categories' });
@@ -52,7 +60,7 @@ router.get('/categories', optionalAuth, async (req, res) => {
 
 /**
  * GET /api/tests/category/:categoryId
- * Get tests by category (optionally filtered by exam)
+ * Get tests by category (optionally filtered by exam) - cached 12h
  * Query params: examId (optional) - filter by exam
  * Returns hasAttempted: true/false for each test if user is authenticated
  */
@@ -61,82 +69,79 @@ router.get('/category/:categoryId', optionalAuth, async (req, res) => {
         const { categoryId } = req.params;
         const { examId } = req.query;
         const userId = req.user?.id;
+        const examIdStr = examId as string | undefined;
 
         // If categoryId is a UUID, use it directly.
         // If it's a slug (e.g., 'topic-wise'), resolve it first.
         let targetId = categoryId;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
 
-        console.log(`[TestsAPI] Fetching tests for category: "${categoryId}" (IsUUID: ${isUuid}), examId: ${examId || 'all'}, userId: ${userId || 'anonymous'}`);
-
         if (!isUuid) {
+            // Slug lookup - can also be cached but it's fast
             const { data: cat, error: catError } = await supabaseAdmin
                 .from('test_categories')
                 .select('id, slug')
                 .eq('slug', categoryId)
                 .single();
 
-            if (catError) console.error('[TestsAPI] Category lookup error:', catError);
-
-            if (cat) {
-                targetId = cat.id;
-                console.log(`[TestsAPI] Resolved slug "${categoryId}" to ID: ${targetId}`);
-            } else {
-                console.warn(`[TestsAPI] Slug "${categoryId}" not found in DB`);
+            if (catError || !cat) {
                 return res.json([]); // Invalid slug
             }
+            targetId = cat.id;
         }
 
-        // Build query with optional exam filter
-        // tests.subject_id is exam_subjects.id, which matches AppContext subjects
-        let query = supabaseAdmin
-            .from('tests')
-            .select(`
-                *,
-                test_questions(count)
-            `)
-            .eq('test_category_id', targetId)
-            .eq('is_active', true);
+        // Get cached test list (without hasAttempted - we merge that after)
+        const cachedTests = await cache.getOrSet(
+            cache.KEYS.testsByCategory(targetId, examIdStr),
+            cache.TTL.TESTS_LIST,
+            async () => {
+                let query = supabaseAdmin
+                    .from('tests')
+                    .select(`
+                        *,
+                        test_questions(count)
+                    `)
+                    .eq('test_category_id', targetId)
+                    .eq('is_active', true);
 
-        // Apply exam filter if provided
-        if (examId && typeof examId === 'string') {
-            query = query.eq('exam_id', examId);
-            console.log(`[TestsAPI] Filtering by exam_id: ${examId}`);
-        }
+                if (examIdStr) {
+                    query = query.eq('exam_id', examIdStr);
+                }
 
-        const { data, error } = await query.order('created_at', { ascending: false });
+                const { data, error } = await query.order('created_at', { ascending: false });
+                if (error) throw error;
 
-        if (error) {
-            console.error('[TestsAPI] Query error:', error);
-            throw error;
-        }
+                // Map to include total_questions (without hasAttempted)
+                return (data || []).map(test => ({
+                    ...test,
+                    total_questions: test.test_questions?.[0]?.count || 0
+                }));
+            }
+        );
 
-        console.log(`[TestsAPI] Found ${data?.length} tests for category ID ${targetId}${examId ? ` and exam ${examId}` : ''}`);
-
-        // Get user's attempt status for each test if authenticated
+        // Merge user's attempt status if authenticated
         let attemptedTestIds: Set<string> = new Set();
-        if (userId && data && data.length > 0) {
-            const testIds = data.map(t => t.id);
+        if (userId && cachedTests.length > 0) {
+            const testIds = cachedTests.map((t: any) => t.id);
             const { data: attempts } = await supabaseAdmin
                 .from('test_attempts')
                 .select('test_id')
                 .eq('user_id', userId)
                 .in('test_id', testIds)
-                .not('completed_at', 'is', null); // Only count completed attempts
+                .not('completed_at', 'is', null);
 
             if (attempts) {
                 attemptedTestIds = new Set(attempts.map(a => a.test_id));
             }
         }
 
-        // Map data to include total_questions and hasAttempted
-        const testsWithCount = data.map(test => ({
+        // Add hasAttempted to each test
+        const testsWithAttempted = cachedTests.map((test: any) => ({
             ...test,
-            total_questions: test.test_questions?.[0]?.count || 0,
             hasAttempted: attemptedTestIds.has(test.id)
         }));
 
-        res.json(testsWithCount);
+        res.json(testsWithAttempted);
     } catch (error) {
         console.error('Get tests by category error:', error);
         res.status(500).json({ error: 'Failed to fetch tests' });
@@ -145,95 +150,107 @@ router.get('/category/:categoryId', optionalAuth, async (req, res) => {
 
 /**
  * GET /api/tests/:id
- * Get test with questions
+ * Get test with questions (cached 1h, language filter applied on return)
  */
 router.get('/:id', optionalAuth, async (req, res) => {
     try {
         const { id } = req.params;
         const languageId = req.user?.preferred_language_id;
 
-        // Get test details
-        const { data: test, error } = await supabaseAdmin
-            .from('tests')
-            .select('*')
-            .eq('id', id)
-            .single();
+        // Get cached test data (without language filter - we apply it after)
+        const cachedData = await cache.getOrSet(
+            cache.KEYS.testWithQuestions(id),
+            cache.TTL.TEST_WITH_QUESTIONS,
+            async () => {
+                // Get test details
+                const { data: test, error } = await supabaseAdmin
+                    .from('tests')
+                    .select('*')
+                    .eq('id', id)
+                    .single();
 
-        if (error) throw error;
-        if (!test) {
+                if (error) throw error;
+                if (!test) return null;
+
+                // Try to get questions from test_questions junction table
+                const { data: testQuestions } = await supabaseAdmin
+                    .from('test_questions')
+                    .select(`
+                        order_index,
+                        question:questions(
+                            *,
+                            translations:question_translations(*, language:languages(*))
+                        )
+                    `)
+                    .eq('test_id', id)
+                    .order('order_index');
+
+                let rawQuestions: any[] = [];
+
+                if (testQuestions && testQuestions.length > 0) {
+                    rawQuestions = testQuestions.map(tq => {
+                        const q = tq.question as any;
+                        return {
+                            id: q.id,
+                            order: tq.order_index,
+                            difficulty: q.difficulty,
+                            correctAnswer: q.correct_answer_index,
+                            translations: q.translations
+                        };
+                    });
+                } else {
+                    // Fallback: fetch random questions from the database
+                    console.log(`[Tests] No test_questions found for test ${id}, fetching from questions pool`);
+
+                    const { data: fallbackQuestions } = await supabaseAdmin
+                        .from('questions')
+                        .select(`
+                            *,
+                            translations:question_translations(*, language:languages(*))
+                        `)
+                        .eq('is_active', true)
+                        .limit(test.total_questions || 20);
+
+                    if (fallbackQuestions && fallbackQuestions.length > 0) {
+                        // Shuffle and format
+                        const shuffled = fallbackQuestions.sort(() => Math.random() - 0.5);
+                        rawQuestions = shuffled.map((q, index) => ({
+                            id: q.id,
+                            order: index + 1,
+                            difficulty: q.difficulty,
+                            correctAnswer: q.correct_answer_index,
+                            translations: q.translations
+                        }));
+                    }
+                }
+
+                return { test, rawQuestions };
+            }
+        );
+
+        if (!cachedData) {
             return res.status(404).json({ error: 'Test not found' });
         }
 
-        // Try to get questions from test_questions junction table
-        const { data: testQuestions } = await supabaseAdmin
-            .from('test_questions')
-            .select(`
-                order_index,
-                question:questions(
-                    *,
-                    translations:question_translations(*, language:languages(*))
-                )
-            `)
-            .eq('test_id', id)
-            .order('order_index');
+        // Apply language filter to translations
+        const questions = cachedData.rawQuestions.map((q: any) => {
+            const translation = languageId
+                ? q.translations?.find((t: any) => t.language_id === languageId)
+                : q.translations?.[0];
 
-        let questions: any[] = [];
+            return {
+                id: q.id,
+                order: q.order,
+                difficulty: q.difficulty,
+                question: translation?.question_text,
+                options: translation?.options,
+                explanation: translation?.explanation,
+                correctAnswer: q.correctAnswer,
+                translations: q.translations
+            };
+        });
 
-        if (testQuestions && testQuestions.length > 0) {
-            // Use linked questions from test_questions
-            questions = testQuestions.map(tq => {
-                const q = tq.question as any;
-                const translation = languageId
-                    ? q.translations.find((t: any) => t.language_id === languageId)
-                    : q.translations[0];
-
-                return {
-                    id: q.id,
-                    order: tq.order_index,
-                    difficulty: q.difficulty,
-                    question: translation?.question_text,
-                    options: translation?.options,
-                    explanation: translation?.explanation,
-                    correctAnswer: q.correct_answer_index,
-                    translations: q.translations
-                };
-            });
-        } else {
-            // Fallback: fetch random questions from the database
-            console.log(`[Tests] No test_questions found for test ${id}, fetching from questions pool`);
-
-            const { data: fallbackQuestions } = await supabaseAdmin
-                .from('questions')
-                .select(`
-                    *,
-                    translations:question_translations(*, language:languages(*))
-                `)
-                .eq('is_active', true)
-                .limit(test.total_questions || 20);
-
-            if (fallbackQuestions && fallbackQuestions.length > 0) {
-                // Shuffle and format
-                const shuffled = fallbackQuestions.sort(() => Math.random() - 0.5);
-                questions = shuffled.map((q, index) => {
-                    const translation = languageId
-                        ? q.translations.find((t: any) => t.language_id === languageId)
-                        : q.translations[0];
-
-                    return {
-                        id: q.id,
-                        order: index + 1,
-                        difficulty: q.difficulty,
-                        question: translation?.question_text,
-                        options: translation?.options,
-                        explanation: translation?.explanation,
-                        correctAnswer: q.correct_answer_index,
-                        translations: q.translations
-                    };
-                });
-            }
-        }
-
-        res.json({ ...test, questions, totalQuestions: questions.length });
+        res.json({ ...cachedData.test, questions, totalQuestions: questions.length });
     } catch (error) {
         console.error('Get test error:', error);
         res.status(500).json({ error: 'Failed to fetch test' });

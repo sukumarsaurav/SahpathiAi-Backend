@@ -56,6 +56,11 @@ const TTL = {
     EXAM_SUBJECTS: 24 * 60 * 60,     // 24 hours - subjects for an exam
     TOPICS: 12 * 60 * 60,            // 12 hours - topics for a subject
     SUBSCRIPTION_PLANS: 6 * 60 * 60, // 6 hours - subscription plans
+    // New TTLs
+    LANGUAGES: 24 * 60 * 60,         // 24 hours - languages never change
+    TEST_CATEGORIES: 12 * 60 * 60,   // 12 hours - test categories with counts
+    TESTS_LIST: 12 * 60 * 60,        // 12 hours - tests by category
+    TEST_WITH_QUESTIONS: 60 * 60,    // 1 hour - test with questions
 } as const;
 
 // Key prefixes
@@ -71,6 +76,11 @@ const KEYS = {
     examSubjects: (examId: string) => `ex:${examId}:subj`,
     topics: (subjectId: string, examId?: string) => `top:${subjectId}${examId ? `:ex:${examId}` : ''}`,
     subscriptionPlans: () => 'sp:all',
+    // New keys for tests and languages
+    languages: () => 'lang:all',
+    testCategories: (examId?: string) => examId ? `tc:exam:${examId}` : 'tc:all',
+    testsByCategory: (categoryId: string, examId?: string) => `tests:cat:${categoryId}${examId ? `:ex:${examId}` : ''}`,
+    testWithQuestions: (testId: string) => `test:${testId}:full`,
 } as const;
 
 // =====================================================
