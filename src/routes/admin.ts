@@ -4086,5 +4086,399 @@ router.put('/questions/:id/verify', async (req, res) => {
     }
 });
 
+// =====================================================
+// --- SUBSCRIPTION PLAN MANAGEMENT ---
+// =====================================================
+
+// GET /api/admin/subscription-plans - Get all subscription plans
+router.get('/subscription-plans', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('subscription_plans')
+            .select('*')
+            .order('price_monthly');
+
+        if (error) throw error;
+
+        // Enrich with subscriber counts
+        const planIds = (data || []).map((p: any) => p.id);
+        const { data: subscriptions } = await supabase
+            .from('user_subscriptions')
+            .select('plan_id, status, duration_type, is_recurring')
+            .in('plan_id', planIds)
+            .eq('status', 'active');
+
+        // Count subscribers per plan
+        const subscriberCounts: Record<string, { total: number; byDuration: Record<string, number>; recurring: number }> = {};
+        (subscriptions || []).forEach((sub: any) => {
+            if (!subscriberCounts[sub.plan_id]) {
+                subscriberCounts[sub.plan_id] = { total: 0, byDuration: {}, recurring: 0 };
+            }
+            subscriberCounts[sub.plan_id].total++;
+            subscriberCounts[sub.plan_id].byDuration[sub.duration_type] =
+                (subscriberCounts[sub.plan_id].byDuration[sub.duration_type] || 0) + 1;
+            if (sub.is_recurring) {
+                subscriberCounts[sub.plan_id].recurring++;
+            }
+        });
+
+        const enrichedPlans = (data || []).map((plan: any) => ({
+            ...plan,
+            active_subscribers: subscriberCounts[plan.id]?.total || 0,
+            subscribers_by_duration: subscriberCounts[plan.id]?.byDuration || {},
+            recurring_subscribers: subscriberCounts[plan.id]?.recurring || 0,
+        }));
+
+        res.json(enrichedPlans);
+    } catch (error) {
+        console.error('Error fetching subscription plans:', error);
+        res.status(500).json({ error: 'Failed to fetch subscription plans' });
+    }
+});
+
+// POST /api/admin/subscription-plans - Create a new subscription plan
+router.post('/subscription-plans', async (req, res) => {
+    try {
+        const {
+            name,
+            price_monthly,
+            price_3_months,
+            price_6_months,
+            price_yearly,
+            features,
+            tests_per_month,
+            is_active = true
+        } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: 'Plan name is required' });
+        }
+
+        const { data, error } = await supabase
+            .from('subscription_plans')
+            .insert({
+                name,
+                price_monthly: price_monthly || 0,
+                price_3_months: price_3_months || 0,
+                price_6_months: price_6_months || 0,
+                price_yearly: price_yearly || 0,
+                features: features || [],
+                tests_per_month,
+                is_active
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating subscription plan:', error);
+        res.status(500).json({ error: 'Failed to create subscription plan' });
+    }
+});
+
+// PUT /api/admin/subscription-plans/:id - Update a subscription plan
+router.put('/subscription-plans/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            name,
+            price_monthly,
+            price_3_months,
+            price_6_months,
+            price_yearly,
+            features,
+            tests_per_month,
+            is_active
+        } = req.body;
+
+        const updateData: any = {};
+        if (name !== undefined) updateData.name = name;
+        if (price_monthly !== undefined) updateData.price_monthly = price_monthly;
+        if (price_3_months !== undefined) updateData.price_3_months = price_3_months;
+        if (price_6_months !== undefined) updateData.price_6_months = price_6_months;
+        if (price_yearly !== undefined) updateData.price_yearly = price_yearly;
+        if (features !== undefined) updateData.features = features;
+        if (tests_per_month !== undefined) updateData.tests_per_month = tests_per_month;
+        if (is_active !== undefined) updateData.is_active = is_active;
+
+        const { data, error } = await supabase
+            .from('subscription_plans')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating subscription plan:', error);
+        res.status(500).json({ error: 'Failed to update subscription plan' });
+    }
+});
+
+// DELETE /api/admin/subscription-plans/:id - Delete a subscription plan
+router.delete('/subscription-plans/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Check if any users are subscribed to this plan
+        const { count: subscriberCount } = await supabase
+            .from('user_subscriptions')
+            .select('*', { count: 'exact', head: true })
+            .eq('plan_id', id)
+            .eq('status', 'active');
+
+        if (subscriberCount && subscriberCount > 0) {
+            return res.status(400).json({
+                error: `Cannot delete plan with ${subscriberCount} active subscriber(s). Deactivate the plan instead.`
+            });
+        }
+
+        const { error } = await supabase
+            .from('subscription_plans')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting subscription plan:', error);
+        res.status(500).json({ error: 'Failed to delete subscription plan' });
+    }
+});
+
+// GET /api/admin/subscriptions - Get all user subscriptions with filtering
+router.get('/subscriptions', async (req, res) => {
+    try {
+        const { page = 1, limit = 20, status, plan_id, duration_type, is_recurring } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('user_subscriptions')
+            .select(`
+                *,
+                plan:subscription_plans(id, name),
+                user:users(id, email, full_name)
+            `, { count: 'exact' })
+            .order('started_at', { ascending: false })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (status) query = query.eq('status', status);
+        if (plan_id) query = query.eq('plan_id', plan_id);
+        if (duration_type) query = query.eq('duration_type', duration_type);
+        if (is_recurring !== undefined) query = query.eq('is_recurring', is_recurring === 'true');
+
+        const { data, count, error } = await query;
+
+        if (error) throw error;
+
+        // Calculate days until expiry for each subscription
+        const enrichedData = (data || []).map((sub: any) => {
+            let daysUntilExpiry: number | null = null;
+            if (sub.expires_at) {
+                const expiryDate = new Date(sub.expires_at);
+                const now = new Date();
+                daysUntilExpiry = Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+            }
+            return {
+                ...sub,
+                days_until_expiry: daysUntilExpiry
+            };
+        });
+
+        res.json({
+            subscriptions: enrichedData,
+            total: count,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil((count || 0) / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching subscriptions:', error);
+        res.status(500).json({ error: 'Failed to fetch subscriptions' });
+    }
+});
+
+// GET /api/admin/subscriptions/expiring - Get subscriptions expiring soon
+router.get('/subscriptions/expiring', async (req, res) => {
+    try {
+        const { days = 7 } = req.query;
+        const futureDate = new Date();
+        futureDate.setDate(futureDate.getDate() + Number(days));
+
+        const { data, error } = await supabase
+            .from('user_subscriptions')
+            .select(`
+                *,
+                plan:subscription_plans(id, name),
+                user:users(id, email, full_name)
+            `)
+            .eq('status', 'active')
+            .eq('is_recurring', false)
+            .not('expires_at', 'is', null)
+            .gt('expires_at', new Date().toISOString())
+            .lte('expires_at', futureDate.toISOString())
+            .order('expires_at', { ascending: true });
+
+        if (error) throw error;
+
+        const enrichedData = (data || []).map((sub: any) => {
+            const expiryDate = new Date(sub.expires_at);
+            const now = new Date();
+            const daysUntilExpiry = Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+            return {
+                ...sub,
+                days_until_expiry: daysUntilExpiry
+            };
+        });
+
+        res.json(enrichedData);
+    } catch (error) {
+        console.error('Error fetching expiring subscriptions:', error);
+        res.status(500).json({ error: 'Failed to fetch expiring subscriptions' });
+    }
+});
+
+// GET /api/admin/analytics/subscription-duration-stats - Duration breakdown analytics
+router.get('/analytics/subscription-duration-stats', async (req, res) => {
+    try {
+        // Get all active subscriptions with duration info
+        const { data: subscriptions } = await supabase
+            .from('user_subscriptions')
+            .select('duration_type, is_recurring, plan_id')
+            .eq('status', 'active');
+
+        // Get plan info
+        const { data: plans } = await supabase
+            .from('subscription_plans')
+            .select('id, name, price_monthly, price_3_months, price_6_months, price_yearly')
+            .eq('is_active', true);
+
+        const planMap: Record<string, any> = {};
+        (plans || []).forEach((p: any) => {
+            planMap[p.id] = p;
+        });
+
+        // Duration distribution
+        const durationCounts: Record<string, number> = { '1_month': 0, '3_months': 0, '6_months': 0, '1_year': 0 };
+        const recurringCounts = { recurring: 0, one_time: 0 };
+        const revenueByDuration: Record<string, number> = { '1_month': 0, '3_months': 0, '6_months': 0, '1_year': 0 };
+
+        (subscriptions || []).forEach((sub: any) => {
+            const durationType = sub.duration_type || '1_month';
+            durationCounts[durationType] = (durationCounts[durationType] || 0) + 1;
+
+            if (sub.is_recurring) {
+                recurringCounts.recurring++;
+            } else {
+                recurringCounts.one_time++;
+            }
+
+            // Estimate revenue
+            const plan = planMap[sub.plan_id];
+            if (plan) {
+                const priceField = `price_${durationType === '1_year' ? 'yearly' : durationType}`;
+                const price = plan[priceField] || plan.price_monthly || 0;
+                revenueByDuration[durationType] = (revenueByDuration[durationType] || 0) + parseFloat(price);
+            }
+        });
+
+        // Get recent payment orders with duration
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const { data: recentPayments } = await supabase
+            .from('payment_orders')
+            .select('amount, duration, is_recurring, paid_at')
+            .eq('status', 'paid')
+            .gt('paid_at', thirtyDaysAgo);
+
+        const durationTrend: Record<string, Record<string, number>> = {};
+        (recentPayments || []).forEach((p: any) => {
+            if (p.paid_at) {
+                const date = new Date(p.paid_at).toISOString().split('T')[0];
+                const dur = p.duration || '1_month';
+                if (!durationTrend[date]) {
+                    durationTrend[date] = { '1_month': 0, '3_months': 0, '6_months': 0, '1_year': 0 };
+                }
+                durationTrend[date][dur] = (durationTrend[date][dur] || 0) + 1;
+            }
+        });
+
+        // Build trend chart data
+        const trendData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            trendData.push({
+                date: dateStr,
+                ...durationTrend[dateStr] || { '1_month': 0, '3_months': 0, '6_months': 0, '1_year': 0 }
+            });
+        }
+
+        res.json({
+            duration_distribution: durationCounts,
+            recurring_vs_onetime: recurringCounts,
+            revenue_by_duration: revenueByDuration,
+            duration_trend: trendData,
+            total_active: (subscriptions || []).length
+        });
+    } catch (error) {
+        console.error('Error fetching subscription duration stats:', error);
+        res.status(500).json({ error: 'Failed to fetch subscription duration stats' });
+    }
+});
+
+// POST /api/admin/subscriptions/:id/extend - Extend a subscription manually
+router.post('/subscriptions/:id/extend', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { days } = req.body;
+
+        if (!days || days <= 0) {
+            return res.status(400).json({ error: 'Valid number of days is required' });
+        }
+
+        // Get current subscription
+        const { data: subscription, error: fetchError } = await supabase
+            .from('user_subscriptions')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !subscription) {
+            return res.status(404).json({ error: 'Subscription not found' });
+        }
+
+        // Calculate new expiry date
+        const currentExpiry = subscription.expires_at ? new Date(subscription.expires_at) : new Date();
+        const newExpiry = new Date(currentExpiry);
+        newExpiry.setDate(newExpiry.getDate() + Number(days));
+
+        const { data, error } = await supabase
+            .from('user_subscriptions')
+            .update({
+                expires_at: newExpiry.toISOString(),
+                status: 'active' // Reactivate if expired
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({
+            success: true,
+            subscription: data,
+            message: `Subscription extended by ${days} days. New expiry: ${newExpiry.toISOString()}`
+        });
+    } catch (error) {
+        console.error('Error extending subscription:', error);
+        res.status(500).json({ error: 'Failed to extend subscription' });
+    }
+});
+
 export default router;
 
