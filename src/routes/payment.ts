@@ -5,15 +5,56 @@ import { razorpay, verifyPaymentSignature } from '../config/razorpay';
 
 const router = Router();
 
+// Duration type definitions
+type DurationType = '1_month' | '3_months' | '6_months' | '1_year';
+
+// Map duration to months for expiry calculation
+const DURATION_MONTHS: Record<DurationType, number> = {
+    '1_month': 1,
+    '3_months': 3,
+    '6_months': 6,
+    '1_year': 12,
+};
+
+// Map duration to price field
+const DURATION_PRICE_FIELD: Record<DurationType, string> = {
+    '1_month': 'price_monthly',
+    '3_months': 'price_3_months',
+    '6_months': 'price_6_months',
+    '1_year': 'price_yearly',
+};
+
+// Early renewal constants
+const EARLY_RENEWAL_DAYS = 7;
+const EARLY_RENEWAL_DISCOUNT = 0.10; // 10%
+
 /**
  * POST /api/payment/create-order
  * Create a Razorpay order for subscription payment
+ * Now supports duration-based pricing and optional auto-renewal
  */
 router.post('/create-order', authenticate, async (req, res) => {
     try {
-        const { plan_id, billing_cycle = 'monthly', promo_code } = req.body;
+        const {
+            plan_id,
+            duration = '1_month', // New: duration type
+            is_recurring = false, // New: auto-renewal flag
+            promo_code,
+            billing_cycle // Legacy: for backward compatibility
+        } = req.body;
 
-        console.log('[Payment] Creating order for plan:', plan_id, 'billing:', billing_cycle, 'promo:', promo_code);
+        // Handle legacy billing_cycle conversion
+        let finalDuration: DurationType = duration as DurationType;
+        if (!duration && billing_cycle) {
+            finalDuration = billing_cycle === 'yearly' ? '1_year' : '1_month';
+        }
+
+        console.log('[Payment] Creating order for plan:', plan_id, 'duration:', finalDuration, 'recurring:', is_recurring, 'promo:', promo_code);
+
+        // Validate duration type
+        if (!DURATION_MONTHS[finalDuration]) {
+            return res.status(400).json({ error: 'Invalid duration. Use: 1_month, 3_months, 6_months, or 1_year' });
+        }
 
         if (!plan_id) {
             return res.status(400).json({ error: 'Plan ID is required' });
@@ -24,8 +65,6 @@ router.post('/create-order', authenticate, async (req, res) => {
             console.error('[Payment] Razorpay credentials not configured');
             return res.status(500).json({ error: 'Payment gateway not configured. Please contact support.' });
         }
-
-        console.log('[Payment] Razorpay credentials present');
 
         // Get plan details
         const { data: plan, error: planError } = await supabaseAdmin
@@ -39,14 +78,50 @@ router.post('/create-order', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Plan not found' });
         }
 
-        console.log('[Payment] Plan found:', plan.name, 'Price:', plan.price_monthly);
+        console.log('[Payment] Plan found:', plan.name);
 
-        // Get price based on billing cycle
-        const originalAmount = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
+        // Get price based on duration
+        const priceField = DURATION_PRICE_FIELD[finalDuration];
+        let originalAmount = plan[priceField];
+
+        // Fallback to calculated price if specific duration price not set
+        if (!originalAmount || originalAmount === 0) {
+            const monthlyPrice = plan.price_monthly || 0;
+            const months = DURATION_MONTHS[finalDuration];
+            const discountMultiplier =
+                finalDuration === '3_months' ? 0.9 :
+                    finalDuration === '6_months' ? 0.83 :
+                        finalDuration === '1_year' ? 0.7 : 1;
+            originalAmount = Math.round(monthlyPrice * months * discountMultiplier);
+        }
+
+        console.log('[Payment] Price for', finalDuration, ':', originalAmount);
+
         let finalAmount = originalAmount;
         let discountAmount = 0;
         let promoCodeId: string | null = null;
         let promoCodeData: any = null;
+
+        // Check for early renewal discount
+        let earlyRenewalDiscount = 0;
+        const { data: currentSub } = await supabaseAdmin
+            .from('user_subscriptions')
+            .select('expires_at, plan_id')
+            .eq('user_id', req.user!.id)
+            .eq('status', 'active')
+            .single();
+
+        if (currentSub?.expires_at) {
+            const expiryDate = new Date(currentSub.expires_at);
+            const now = new Date();
+            const daysUntilExpiry = Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+            if (daysUntilExpiry > 0 && daysUntilExpiry <= EARLY_RENEWAL_DAYS) {
+                earlyRenewalDiscount = Math.round(originalAmount * EARLY_RENEWAL_DISCOUNT);
+                finalAmount = originalAmount - earlyRenewalDiscount;
+                console.log('[Payment] Early renewal discount applied:', earlyRenewalDiscount);
+            }
+        }
 
         // Validate and apply promo code if provided
         if (promo_code) {
@@ -95,7 +170,7 @@ router.post('/create-order', authenticate, async (req, res) => {
             }
 
             // Check minimum order amount
-            if (promoCode.min_order_amount && originalAmount < promoCode.min_order_amount) {
+            if (promoCode.min_order_amount && finalAmount < promoCode.min_order_amount) {
                 return res.status(400).json({
                     error: `Minimum order amount of ₹${promoCode.min_order_amount} required`
                 });
@@ -103,12 +178,12 @@ router.post('/create-order', authenticate, async (req, res) => {
 
             // Calculate discount
             if (promoCode.discount_type === 'percentage') {
-                discountAmount = (originalAmount * promoCode.discount_value) / 100;
+                discountAmount = (finalAmount * promoCode.discount_value) / 100;
             } else {
-                discountAmount = Math.min(promoCode.discount_value, originalAmount);
+                discountAmount = Math.min(promoCode.discount_value, finalAmount);
             }
 
-            finalAmount = Math.max(0, originalAmount - discountAmount);
+            finalAmount = Math.max(0, finalAmount - discountAmount);
             promoCodeId = promoCode.id;
             promoCodeData = {
                 code: promoCode.code,
@@ -130,15 +205,22 @@ router.post('/create-order', authenticate, async (req, res) => {
                 .eq('user_id', req.user!.id)
                 .eq('status', 'active');
 
-            // Create free subscription
+            // Calculate expiry
+            const expiresAt = new Date();
+            const months = DURATION_MONTHS[finalDuration];
+            expiresAt.setMonth(expiresAt.getMonth() + months);
+
+            // Create subscription
             const { data: subscription, error: subError } = await supabaseAdmin
                 .from('user_subscriptions')
                 .insert({
                     user_id: req.user!.id,
                     plan_id,
                     status: 'active',
+                    duration_type: finalDuration,
+                    is_recurring: is_recurring,
                     started_at: new Date().toISOString(),
-                    expires_at: null // Free plan doesn't expire
+                    expires_at: plan.name === 'Free' ? null : expiresAt.toISOString()
                 })
                 .select('*, plan:subscription_plans(*)')
                 .single();
@@ -158,7 +240,6 @@ router.post('/create-order', authenticate, async (req, res) => {
                         discount_amount: discountAmount
                     });
 
-                // Increment promo code usage count
                 await supabaseAdmin.rpc('increment_promo_uses', { promo_id: promoCodeId });
             }
 
@@ -174,8 +255,6 @@ router.post('/create-order', authenticate, async (req, res) => {
         // Create Razorpay order for paid plans
         console.log('[Payment] Creating Razorpay order for amount:', finalAmount);
 
-        // Create a short receipt (max 40 chars for Razorpay)
-        // Format: sub_<timestamp>_<last-8-chars-of-user-id>
         const timestamp = Date.now();
         const userIdShort = req.user!.id.slice(-8);
         const receipt = `sub_${timestamp}_${userIdShort}`;
@@ -187,7 +266,8 @@ router.post('/create-order', authenticate, async (req, res) => {
             notes: {
                 user_id: req.user!.id,
                 plan_id: plan_id,
-                billing_cycle: billing_cycle,
+                duration: finalDuration,
+                is_recurring: is_recurring.toString(),
                 promo_code_id: promoCodeId || undefined
             }
         };
@@ -198,17 +278,19 @@ router.post('/create-order', authenticate, async (req, res) => {
             const razorpayOrder = await razorpay.orders.create(options as any) as { id: string; amount: number; currency: string };
             console.log('[Payment] Razorpay order created:', razorpayOrder.id);
 
-            // Store order in database
-            const { data: paymentOrder, error: orderError } = await supabaseAdmin
+            // Store order in database with new duration fields
+            const { error: orderError } = await supabaseAdmin
                 .from('payment_orders')
                 .insert({
                     user_id: req.user!.id,
                     razorpay_order_id: razorpayOrder.id,
                     plan_id,
-                    billing_cycle,
+                    billing_cycle: finalDuration === '1_year' ? 'yearly' : 'monthly', // Legacy field
+                    duration: finalDuration,
+                    is_recurring: is_recurring,
                     amount: finalAmount,
                     original_amount: originalAmount,
-                    discount_amount: discountAmount,
+                    discount_amount: discountAmount + earlyRenewalDiscount,
                     promo_code_id: promoCodeId,
                     currency: 'INR',
                     status: 'created'
@@ -231,19 +313,17 @@ router.post('/create-order', authenticate, async (req, res) => {
                     id: plan.id,
                     name: plan.name,
                     original_price: originalAmount,
-                    discount_amount: discountAmount,
+                    early_renewal_discount: earlyRenewalDiscount,
+                    promo_discount: discountAmount,
+                    discount_amount: discountAmount + earlyRenewalDiscount,
                     final_price: finalAmount
                 },
+                duration: finalDuration,
+                is_recurring: is_recurring,
                 promo_applied: promoCodeData
             });
         } catch (razorpayError: any) {
             console.error('[Payment] Razorpay order creation failed:', razorpayError);
-            console.error('[Payment] Razorpay error details:', {
-                message: razorpayError.message,
-                description: razorpayError.description,
-                statusCode: razorpayError.statusCode,
-                error: razorpayError.error
-            });
             return res.status(500).json({
                 error: 'Failed to create payment order with Razorpay',
                 details: razorpayError.description || razorpayError.message
@@ -251,7 +331,6 @@ router.post('/create-order', authenticate, async (req, res) => {
         }
     } catch (error: any) {
         console.error('[Payment] Create order error:', error);
-        console.error('[Payment] Error stack:', error.stack);
         res.status(500).json({
             error: 'Failed to create payment order',
             details: error.message
@@ -317,13 +396,11 @@ router.post('/verify', authenticate, async (req, res) => {
             .eq('user_id', req.user!.id)
             .eq('status', 'active');
 
-        // Calculate expiry date
+        // Calculate expiry date based on duration
+        const duration = (paymentOrder.duration || '1_month') as DurationType;
+        const months = DURATION_MONTHS[duration] || 1;
         const expiresAt = new Date();
-        if (paymentOrder.billing_cycle === 'yearly') {
-            expiresAt.setFullYear(expiresAt.getFullYear() + 1);
-        } else {
-            expiresAt.setMonth(expiresAt.getMonth() + 1);
-        }
+        expiresAt.setMonth(expiresAt.getMonth() + months);
 
         // Create new subscription
         const { data: subscription, error: subError } = await supabaseAdmin
@@ -332,6 +409,8 @@ router.post('/verify', authenticate, async (req, res) => {
                 user_id: req.user!.id,
                 plan_id: paymentOrder.plan_id,
                 status: 'active',
+                duration_type: duration,
+                is_recurring: paymentOrder.is_recurring || false,
                 started_at: new Date().toISOString(),
                 expires_at: expiresAt.toISOString()
             })
@@ -348,18 +427,18 @@ router.post('/verify', authenticate, async (req, res) => {
             .single();
 
         if (wallet) {
+            const durationLabel = duration.replace('_', ' ');
             await supabaseAdmin.from('wallet_transactions').insert({
                 wallet_id: wallet.id,
                 type: 'debit',
                 amount: paymentOrder.amount,
-                description: `${paymentOrder.plan.name} subscription (${paymentOrder.billing_cycle}) via Razorpay`,
+                description: `${paymentOrder.plan.name} subscription (${durationLabel}) via Razorpay`,
                 category: 'subscription'
             });
         }
 
         // Record promo code usage if a promo code was used
         if (paymentOrder.promo_code_id && paymentOrder.discount_amount > 0) {
-            // Record the usage
             await supabaseAdmin
                 .from('promo_code_usages')
                 .insert({
@@ -369,14 +448,13 @@ router.post('/verify', authenticate, async (req, res) => {
                     discount_amount: paymentOrder.discount_amount
                 });
 
-            // Increment promo code usage count
             await supabaseAdmin.rpc('increment_promo_uses', { promo_id: paymentOrder.promo_code_id });
         }
 
         res.json({
             success: true,
             subscription,
-            message: `Successfully subscribed to ${paymentOrder.plan.name}`
+            message: `Successfully subscribed to ${paymentOrder.plan.name} for ${duration.replace('_', ' ')}`
         });
     } catch (error) {
         console.error('Verify payment error:', error);
@@ -411,13 +489,25 @@ router.get('/order/:orderId', authenticate, async (req, res) => {
 /**
  * POST /api/payment/validate-promo
  * Validate a promo code and return discount information
+ * Now supports duration-based pricing
  */
 router.post('/validate-promo', authenticate, async (req, res) => {
     try {
-        const { code, plan_id, billing_cycle = 'monthly' } = req.body;
+        const {
+            code,
+            plan_id,
+            duration = '1_month', // New: duration type
+            billing_cycle // Legacy: for backward compatibility
+        } = req.body;
 
         if (!code || !plan_id) {
             return res.status(400).json({ error: 'Code and plan_id are required' });
+        }
+
+        // Handle legacy billing_cycle conversion
+        let finalDuration: DurationType = duration as DurationType;
+        if (!duration && billing_cycle) {
+            finalDuration = billing_cycle === 'yearly' ? '1_year' : '1_month';
         }
 
         // Get promo code
@@ -481,7 +571,20 @@ router.post('/validate-promo', authenticate, async (req, res) => {
             return res.status(404).json({ error: 'Plan not found' });
         }
 
-        const originalPrice = billing_cycle === 'yearly' ? plan.price_yearly : plan.price_monthly;
+        // Get price based on duration
+        const priceField = DURATION_PRICE_FIELD[finalDuration];
+        let originalPrice = plan[priceField];
+
+        // Fallback to calculated price if specific duration price not set
+        if (!originalPrice || originalPrice === 0) {
+            const monthlyPrice = plan.price_monthly || 0;
+            const months = DURATION_MONTHS[finalDuration];
+            const discountMultiplier =
+                finalDuration === '3_months' ? 0.9 :
+                    finalDuration === '6_months' ? 0.83 :
+                        finalDuration === '1_year' ? 0.7 : 1;
+            originalPrice = Math.round(monthlyPrice * months * discountMultiplier);
+        }
 
         // Check minimum order amount
         if (promoCode.min_order_amount && originalPrice < promoCode.min_order_amount) {
@@ -511,7 +614,8 @@ router.post('/validate-promo', authenticate, async (req, res) => {
             },
             original_price: originalPrice,
             discount_amount: discountAmount,
-            final_price: finalPrice
+            final_price: finalPrice,
+            duration: finalDuration
         });
     } catch (error) {
         console.error('Validate promo code error:', error);

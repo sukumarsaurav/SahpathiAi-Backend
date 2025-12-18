@@ -249,8 +249,10 @@ CREATE TABLE IF NOT EXISTS wallet_transactions (
 CREATE TABLE IF NOT EXISTS subscription_plans (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name VARCHAR(50) NOT NULL,
-  price_monthly DECIMAL(10, 2) DEFAULT 0,
-  price_yearly DECIMAL(10, 2) DEFAULT 0,
+  price_monthly DECIMAL(10, 2) DEFAULT 0, -- Price for 1-month (legacy: price_monthly)
+  price_3_months DECIMAL(10, 2) DEFAULT 0, -- Price for 3-month duration
+  price_6_months DECIMAL(10, 2) DEFAULT 0, -- Price for 6-month duration
+  price_yearly DECIMAL(10, 2) DEFAULT 0, -- Price for 12-month (legacy: price_yearly)
   features JSONB,
   tests_per_month INT, -- NULL = unlimited
   is_active BOOLEAN DEFAULT true
@@ -262,6 +264,8 @@ CREATE TABLE IF NOT EXISTS user_subscriptions (
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   plan_id UUID REFERENCES subscription_plans(id),
   status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'expired')),
+  duration_type VARCHAR(20) DEFAULT '1_month' CHECK (duration_type IN ('1_month', '3_months', '6_months', '1_year')),
+  is_recurring BOOLEAN DEFAULT FALSE, -- One-time by default, true for auto-renewal
   started_at TIMESTAMPTZ DEFAULT NOW(),
   expires_at TIMESTAMPTZ,
   cancelled_at TIMESTAMPTZ
@@ -295,7 +299,9 @@ CREATE TABLE IF NOT EXISTS payment_orders (
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   razorpay_order_id VARCHAR(100) UNIQUE,
   plan_id UUID REFERENCES subscription_plans(id),
-  billing_cycle VARCHAR(20) CHECK (billing_cycle IN ('monthly', 'yearly')),
+  billing_cycle VARCHAR(20) CHECK (billing_cycle IN ('monthly', 'yearly')), -- Legacy, kept for compatibility
+  duration VARCHAR(20) DEFAULT '1_month' CHECK (duration IN ('1_month', '3_months', '6_months', '1_year')),
+  is_recurring BOOLEAN DEFAULT FALSE,
   amount DECIMAL(10, 2) NOT NULL,
   original_amount DECIMAL(10, 2),
   discount_amount DECIMAL(10, 2) DEFAULT 0,
