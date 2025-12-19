@@ -4612,6 +4612,21 @@ router.get('/analytics/user-demographics', async (req, res) => {
             .sort((a, b) => b.count - a.count)
             .slice(0, 10);
 
+        // State breakdown for India (for India choropleth map)
+        const stateCounts: Record<string, { state: string; code: string; count: number }> = {};
+        sessions.forEach((s: any) => {
+            // Only count sessions from India with region/state data
+            if (s.country_code === 'IN' && s.region) {
+                const stateName = s.region;
+                if (!stateCounts[stateName]) {
+                    stateCounts[stateName] = { state: stateName, code: '', count: 0 };
+                }
+                stateCounts[stateName].count++;
+            }
+        });
+        const stateBreakdown = Object.values(stateCounts)
+            .sort((a, b) => b.count - a.count);
+
         // Sessions in last 7 days
         const sessions7d = sessions.filter((s: any) => new Date(s.created_at) > new Date(sevenDaysAgo));
 
@@ -4629,6 +4644,7 @@ router.get('/analytics/user-demographics', async (req, res) => {
             browser_breakdown: browserBreakdown,
             country_breakdown: countryBreakdown,
             city_breakdown: cityBreakdown,
+            state_breakdown: stateBreakdown, // New: Indian states breakdown for India map
             total_sessions_30d: sessions.length,
             total_sessions_7d: sessions7d.length,
             unique_users_30d: uniqueUsers,
