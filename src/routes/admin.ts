@@ -1295,7 +1295,9 @@ router.post('/questions/bulk', async (req, res) => {
                             topic_id: q.topic_id,
                             difficulty: q.difficulty || 'medium',
                             correct_answer_index: q.correct_answer_index,
-                            is_active: q.is_active !== false
+                            is_active: q.is_active !== false,
+                            is_ai_generated: q.is_ai_generated || false,
+                            is_verified: q.is_ai_generated ? false : true
                         })
                         .select()
                         .single();
@@ -1352,8 +1354,18 @@ router.post('/questions/bulk', async (req, res) => {
                         }
                     }
 
-                    // 4. Link Concepts by name if provided
-                    if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
+                    // 4. Link Concepts by ID if provided
+                    if (q.concept_ids && Array.isArray(q.concept_ids) && q.concept_ids.length > 0) {
+                        for (let ci = 0; ci < q.concept_ids.length; ci++) {
+                            await supabase.from('question_concepts').insert({
+                                question_id: question.id,
+                                concept_id: q.concept_ids[ci],
+                                is_primary: ci === 0 // First concept is primary
+                            });
+                        }
+                    }
+                    // 5. Link Concepts by name if provided (fallback)
+                    else if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
                         // Find concepts by name within the same topic
                         const { data: topicConcepts } = await supabase
                             .from('concepts')
@@ -1396,7 +1408,9 @@ router.post('/questions/bulk', async (req, res) => {
                             topic_id: q.topic_id,
                             difficulty: q.difficulty || 'medium',
                             correct_answer_index: q.correct_answer_index,
-                            is_active: q.is_active !== false
+                            is_active: q.is_active !== false,
+                            is_ai_generated: q.is_ai_generated || false,
+                            is_verified: q.is_ai_generated ? false : true
                         })
                         .select()
                         .single();
@@ -1443,8 +1457,18 @@ router.post('/questions/bulk', async (req, res) => {
                         }
                     }
 
-                    // 4. Link Concepts by name if provided (single-language mode)
-                    if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
+                    // 4. Link Concepts by ID if provided (single-language mode)
+                    if (q.concept_ids && Array.isArray(q.concept_ids) && q.concept_ids.length > 0) {
+                        for (let ci = 0; ci < q.concept_ids.length; ci++) {
+                            await supabase.from('question_concepts').insert({
+                                question_id: question.id,
+                                concept_id: q.concept_ids[ci],
+                                is_primary: ci === 0
+                            });
+                        }
+                    }
+                    // 5. Link Concepts by name if provided (single-language mode, fallback)
+                    else if (q.concept_names && Array.isArray(q.concept_names) && q.concept_names.length > 0) {
                         const { data: topicConcepts } = await supabase
                             .from('concepts')
                             .select('id, name')
@@ -3881,7 +3905,7 @@ router.post('/questions/generate-ai', async (req, res) => {
             existingTexts = translations?.map(t => t.question_text) || [];
         }
 
-        // Generate questions
+        // Generate questions (without saving - just for preview)
         const result = await aiGenerateQuestions({
             topicName: topic.name,
             concepts: concepts,
@@ -3892,79 +3916,13 @@ router.post('/questions/generate-ai', async (req, res) => {
             existingQuestions: existingTexts
         });
 
-        // Process and save generated questions
-        const savedQuestions: any[] = [];
-        const warnings: string[] = [];
-        const primaryLanguage = languages.find(l => l.code === 'en') || languages[0];
-        const primaryQuestions = result.questions[primaryLanguage.code] || [];
-
-        for (let i = 0; i < primaryQuestions.length; i++) {
-            const primaryQ = primaryQuestions[i];
-
-            // Check for duplicates
-            const duplicates = await checkForDuplicates(primaryQ.question_text, topic_id);
-            if (duplicates.length > 0) {
-                warnings.push(`Question ${i + 1} may be similar to existing question: "${duplicates[0].questionText.substring(0, 50)}..."`);
-            }
-
-            // Create question
-            const contentHash = generateContentHash(primaryQ.question_text);
-            const { data: newQuestion, error: qError } = await supabase
-                .from('questions')
-                .insert({
-                    topic_id,
-                    difficulty: primaryQ.difficulty,
-                    correct_answer_index: primaryQ.correct_answer_index,
-                    is_ai_generated: true,
-                    is_verified: false,
-                    content_hash: contentHash,
-                    is_active: true
-                })
-                .select()
-                .single();
-
-            if (qError || !newQuestion) {
-                warnings.push(`Failed to save question ${i + 1}`);
-                continue;
-            }
-
-            // Create translations for all languages
-            for (const lang of languages) {
-                const langQuestions = result.questions[lang.code];
-                if (!langQuestions || !langQuestions[i]) continue;
-
-                const langQ = langQuestions[i];
-                await supabase.from('question_translations').insert({
-                    question_id: newQuestion.id,
-                    language_id: lang.id,
-                    question_text: langQ.question_text,
-                    options: langQ.options,
-                    explanation: langQ.explanation
-                });
-            }
-
-            // Link concepts
-            const conceptsToLink = primaryQ.concept_ids?.length
-                ? primaryQ.concept_ids
-                : concept_ids.slice(0, 2); // Default to first 2 selected concepts
-
-            for (let j = 0; j < conceptsToLink.length; j++) {
-                await supabase.from('question_concepts').insert({
-                    question_id: newQuestion.id,
-                    concept_id: conceptsToLink[j],
-                    is_primary: j === 0
-                });
-            }
-
-            savedQuestions.push(newQuestion);
-        }
-
+        // Return generated questions for preview (not saved yet)
         res.json({
             success: true,
-            generated: savedQuestions.length,
-            requested: count || 10,
-            question_ids: savedQuestions.map(q => q.id),
-            warnings
+            questions: result.questions, // Grouped by language code
+            topic_id: topic_id,
+            concept_ids: concept_ids,
+            requested: count || 10
         });
     } catch (error: any) {
         console.error('Error generating AI questions:', error);
