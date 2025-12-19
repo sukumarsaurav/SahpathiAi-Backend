@@ -248,11 +248,12 @@ router.get('/exam-subjects/:examId', async (req, res) => {
                 id,
                 exam_id,
                 subject_id,
+                display_order,
                 subject:subjects (id, name, icon, color),
                 exam:exams (id, name)
             `)
             .eq('exam_id', examId)
-            .order('created_at'); // or display_order
+            .order('display_order', { ascending: true })
 
         if (error) throw error;
 
@@ -261,6 +262,7 @@ router.get('/exam-subjects/:examId', async (req, res) => {
             id: item.id,
             exam_id: item.exam_id,
             subject_id: item.subject_id,
+            display_order: item.display_order ?? 0,
             subject_name: item.subject?.name || 'Unknown',
             exam_name: item.exam?.name || 'Unknown',
             subject: item.subject,
@@ -279,9 +281,21 @@ router.get('/exam-subjects/:examId', async (req, res) => {
 router.post('/exam-subjects', async (req, res) => {
     try {
         const { exam_id, subject_id } = req.body;
+
+        // Get the highest display_order for this exam
+        const { data: maxOrderData } = await supabase
+            .from('exam_subjects')
+            .select('display_order')
+            .eq('exam_id', exam_id)
+            .order('display_order', { ascending: false })
+            .limit(1)
+            .single();
+
+        const nextOrder = (maxOrderData?.display_order ?? -1) + 1;
+
         const { data, error } = await supabase
             .from('exam_subjects')
-            .insert({ exam_id, subject_id })
+            .insert({ exam_id, subject_id, display_order: nextOrder })
             .select()
             .single();
 
@@ -290,6 +304,33 @@ router.post('/exam-subjects', async (req, res) => {
     } catch (error) {
         console.error('Error linking subject:', error);
         res.status(500).json({ error: 'Failed to link subject' });
+    }
+});
+
+// PUT /api/admin/exam-subjects/reorder
+// Reorder subjects for an exam
+router.put('/exam-subjects/reorder', async (req, res) => {
+    try {
+        const { items } = req.body; // Array of { id: string, display_order: number }
+
+        if (!items || !Array.isArray(items)) {
+            return res.status(400).json({ error: 'items array is required' });
+        }
+
+        // Update each item's display_order
+        for (const item of items) {
+            const { error } = await supabase
+                .from('exam_subjects')
+                .update({ display_order: item.display_order })
+                .eq('id', item.id);
+
+            if (error) throw error;
+        }
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error reordering subjects:', error);
+        res.status(500).json({ error: 'Failed to reorder subjects' });
     }
 });
 
