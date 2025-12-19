@@ -825,7 +825,8 @@ CREATE TABLE IF NOT EXISTS social_accounts (
   last_sync_at TIMESTAMPTZ,
   connected_by UUID REFERENCES users(id),
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(account_id, platform)  -- For upsert in OAuth flow
 );
 
 -- Social Posts

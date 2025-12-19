@@ -30,6 +30,7 @@ import resourceRoutes from './routes/resources';
 import paymentRoutes from './routes/payment';
 import supportRoutes from './routes/support';
 import trackingRoutes from './routes/tracking';
+import socialRoutes from './routes/social';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -112,6 +113,7 @@ app.use('/api/resources', resourceRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/track', trackingRoutes);
+app.use('/api/admin/social', socialRoutes);
 
 // Error handling middleware
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
