@@ -5003,6 +5003,191 @@ router.get('/analytics/referral-sources', async (req, res) => {
     }
 });
 
+// Source colors for consistent visualization
+const SOURCE_COLORS: Record<string, string> = {
+    facebook: '#1877F2',
+    instagram: '#E4405F',
+    whatsapp: '#25D366',
+    youtube: '#FF0000',
+    linkedin: '#0A66C2',
+    twitter: '#1DA1F2',
+    google: '#4285F4',
+    direct: '#6B7280',
+    email: '#F59E0B',
+    referral: '#8B5CF6',
+    organic: '#10B981'
+};
+
+// GET /api/admin/analytics/marketing-funnel - Full marketing funnel with per-source breakdown
+router.get('/analytics/marketing-funnel', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // 1. Get website visitors (top of funnel)
+        const { data: visitors, error: visitorsError } = await supabase
+            .from('website_visitors')
+            .select('*')
+            .gt('first_visit_at', thirtyDaysAgo);
+
+        if (visitorsError) {
+            console.error('Visitors query error:', visitorsError);
+            // Continue without visitor data (table might not exist yet)
+        }
+
+        // 2. Get user referral sources (registrations)
+        const { data: referrals, error: referralsError } = await supabase
+            .from('user_referral_sources')
+            .select('*')
+            .gt('created_at', thirtyDaysAgo);
+
+        if (referralsError) throw referralsError;
+
+        // 3. Get subscription data for free vs paid breakdown
+        const userIds = [...new Set((referrals || []).map((r: any) => r.user_id))];
+
+        let subscriptions: any[] = [];
+        if (userIds.length > 0) {
+            const { data: subs } = await supabase
+                .from('user_subscriptions')
+                .select('user_id, status, plan:subscription_plans(id, name)')
+                .in('user_id', userIds)
+                .eq('status', 'active');
+            subscriptions = subs || [];
+        }
+
+        // Get all users without active subscription (free users)
+        const subscribedUserIds = new Set(subscriptions.map((s: any) => s.user_id));
+
+        // Build per-source breakdown
+        const sourceStats: Record<string, {
+            visits: number;
+            registrations: number;
+            free_users: number;
+            paid_users: number;
+        }> = {};
+
+        // Process visitors (if available)
+        (visitors || []).forEach((v: any) => {
+            const source = v.utm_source || 'direct';
+            if (!sourceStats[source]) {
+                sourceStats[source] = { visits: 0, registrations: 0, free_users: 0, paid_users: 0 };
+            }
+            sourceStats[source].visits++;
+        });
+
+        // Process referrals (registrations)
+        (referrals || []).forEach((r: any) => {
+            const source = r.utm_source || 'direct';
+            if (!sourceStats[source]) {
+                sourceStats[source] = { visits: 0, registrations: 0, free_users: 0, paid_users: 0 };
+            }
+            sourceStats[source].registrations++;
+
+            // Check if user has paid subscription
+            if (subscribedUserIds.has(r.user_id)) {
+                const sub = subscriptions.find((s: any) => s.user_id === r.user_id);
+                const planName = (sub?.plan as any)?.name || 'Unknown';
+                if (planName.toLowerCase() !== 'free') {
+                    sourceStats[source].paid_users++;
+                } else {
+                    sourceStats[source].free_users++;
+                }
+            } else {
+                sourceStats[source].free_users++;
+            }
+        });
+
+        // Convert to array with colors and conversion rates
+        const bySource = Object.entries(sourceStats)
+            .map(([source, stats]) => {
+                const visitToSignup = stats.visits > 0
+                    ? Math.round((stats.registrations / stats.visits) * 100 * 10) / 10
+                    : 0;
+                const signupToPaid = stats.registrations > 0
+                    ? Math.round((stats.paid_users / stats.registrations) * 100 * 10) / 10
+                    : 0;
+
+                return {
+                    source,
+                    color: SOURCE_COLORS[source.toLowerCase()] || '#6B7280',
+                    visits: stats.visits,
+                    registrations: stats.registrations,
+                    free_users: stats.free_users,
+                    paid_users: stats.paid_users,
+                    conversion_rate: {
+                        visit_to_signup: visitToSignup,
+                        signup_to_paid: signupToPaid
+                    }
+                };
+            })
+            .sort((a, b) => b.registrations - a.registrations);
+
+        // Calculate total funnel stages
+        const totalVisits = bySource.reduce((sum, s) => sum + s.visits, 0);
+        const totalRegistrations = bySource.reduce((sum, s) => sum + s.registrations, 0);
+        const totalFreeUsers = bySource.reduce((sum, s) => sum + s.free_users, 0);
+        const totalPaidUsers = bySource.reduce((sum, s) => sum + s.paid_users, 0);
+
+        const funnelStages = [
+            {
+                stage: 'Website Visits',
+                total: totalVisits,
+                percentage: 100
+            },
+            {
+                stage: 'Registrations',
+                total: totalRegistrations,
+                percentage: totalVisits > 0 ? Math.round((totalRegistrations / totalVisits) * 100 * 10) / 10 : 0
+            },
+            {
+                stage: 'Free Plan',
+                total: totalFreeUsers,
+                percentage: totalRegistrations > 0 ? Math.round((totalFreeUsers / totalRegistrations) * 100 * 10) / 10 : 0
+            },
+            {
+                stage: 'Paid Plan',
+                total: totalPaidUsers,
+                percentage: totalRegistrations > 0 ? Math.round((totalPaidUsers / totalRegistrations) * 100 * 10) / 10 : 0
+            }
+        ];
+
+        // Find best and worst performing sources
+        const sourcesWithData = bySource.filter(s => s.registrations > 5); // Min threshold
+        const bestSource = sourcesWithData.length > 0
+            ? sourcesWithData.reduce((best, current) =>
+                current.conversion_rate.signup_to_paid > best.conversion_rate.signup_to_paid ? current : best
+            )
+            : null;
+        const worstSource = sourcesWithData.length > 0
+            ? sourcesWithData.reduce((worst, current) =>
+                current.conversion_rate.signup_to_paid < worst.conversion_rate.signup_to_paid ? current : worst
+            )
+            : null;
+
+        res.json({
+            funnel_stages: funnelStages,
+            by_source: bySource,
+            insights: {
+                best_performing: bestSource ? {
+                    source: bestSource.source,
+                    signup_to_paid_rate: bestSource.conversion_rate.signup_to_paid
+                } : null,
+                worst_performing: worstSource && worstSource.source !== bestSource?.source ? {
+                    source: worstSource.source,
+                    signup_to_paid_rate: worstSource.conversion_rate.signup_to_paid
+                } : null,
+                total_visitors: totalVisits,
+                overall_conversion_to_paid: totalRegistrations > 0
+                    ? Math.round((totalPaidUsers / totalRegistrations) * 100 * 10) / 10
+                    : 0
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching marketing funnel:', error);
+        res.status(500).json({ error: 'Failed to fetch marketing funnel' });
+    }
+});
+
 // GET /api/admin/analytics/campaign-roi - Campaign performance with ROI
 router.get('/analytics/campaign-roi', async (req, res) => {
     try {

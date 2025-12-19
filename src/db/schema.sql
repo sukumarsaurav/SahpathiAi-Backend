@@ -771,6 +771,44 @@ CREATE TABLE IF NOT EXISTS user_referral_sources (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Website Visitors (Anonymous Visitor Tracking for Marketing Funnel)
+CREATE TABLE IF NOT EXISTS website_visitors (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  
+  -- Visitor Identification (cookie-based)
+  visitor_id VARCHAR(100) NOT NULL,
+  
+  -- UTM Parameters (captured on first visit)
+  utm_source VARCHAR(50),
+  utm_medium VARCHAR(50),
+  utm_campaign VARCHAR(100),
+  utm_content VARCHAR(100),
+  utm_term VARCHAR(100),
+  
+  -- Additional Context
+  referrer_url TEXT,
+  landing_page TEXT,
+  
+  -- Device/Location Info
+  device_type VARCHAR(20),  -- mobile, desktop, tablet
+  country VARCHAR(100),
+  country_code VARCHAR(10),
+  
+  -- Conversion Tracking
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,  -- Linked when visitor signs up
+  converted_to_signup BOOLEAN DEFAULT false,
+  signup_date TIMESTAMPTZ,
+  
+  -- Visit Tracking
+  visit_count INTEGER DEFAULT 1,
+  first_visit_at TIMESTAMPTZ DEFAULT NOW(),
+  last_visit_at TIMESTAMPTZ DEFAULT NOW(),
+  
+  -- Timestamps
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Social Accounts
 CREATE TABLE IF NOT EXISTS social_accounts (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -895,6 +933,15 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_number ON support_tickets(ticket_
 CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON support_messages(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_support_messages_created ON support_messages(ticket_id, created_at);
 
+-- Website visitors indexes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_visitors_visitor_id ON website_visitors(visitor_id);
+CREATE INDEX IF NOT EXISTS idx_visitors_utm_source ON website_visitors(utm_source);
+CREATE INDEX IF NOT EXISTS idx_visitors_utm_campaign ON website_visitors(utm_campaign);
+CREATE INDEX IF NOT EXISTS idx_visitors_converted ON website_visitors(converted_to_signup);
+CREATE INDEX IF NOT EXISTS idx_visitors_user ON website_visitors(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_visitors_first_visit ON website_visitors(first_visit_at DESC);
+CREATE INDEX IF NOT EXISTS idx_visitors_created ON website_visitors(created_at DESC);
+
 -- =====================================================
 -- PARTIAL INDEXES (Status-based queries optimization)
 -- =====================================================
@@ -973,6 +1020,9 @@ ALTER TABLE promo_code_usages ENABLE ROW LEVEL SECURITY;
 
 -- Admin settings
 ALTER TABLE admin_settings ENABLE ROW LEVEL SECURITY;
+
+-- Marketing/analytics tables (admin access only)
+ALTER TABLE website_visitors ENABLE ROW LEVEL SECURITY;
 
 -- =====================================================
 -- RLS POLICIES - USER DATA (Users can only access their own data)
@@ -1155,6 +1205,12 @@ CREATE POLICY promo_code_usages_admin ON promo_code_usages FOR SELECT USING (
 CREATE POLICY admin_settings_policy ON admin_settings 
 FOR ALL USING (
   (SELECT role FROM users WHERE id = auth.uid()) = 'admin'
+);
+
+-- Website visitors policy (admin and content managers can view)
+CREATE POLICY website_visitors_admin ON website_visitors 
+FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
 );
 
 -- =====================================================

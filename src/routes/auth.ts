@@ -23,7 +23,9 @@ router.post('/signup', async (req, res) => {
             utm_content,
             utm_term,
             referrer_url,
-            landing_page
+            landing_page,
+            // Visitor tracking for marketing funnel
+            visitor_id
         } = req.body;
 
         // Create auth user
@@ -117,6 +119,24 @@ router.post('/signup', async (req, res) => {
                 });
             } catch (utmError) {
                 console.error('Failed to track referral source:', utmError);
+                // Non-critical, don't fail signup
+            }
+        }
+
+        // Link anonymous visitor to user for marketing funnel tracking
+        if (visitor_id) {
+            try {
+                await supabaseAdmin
+                    .from('website_visitors')
+                    .update({
+                        user_id: authData.user.id,
+                        converted_to_signup: true,
+                        signup_date: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('visitor_id', visitor_id);
+            } catch (visitorError) {
+                console.error('Failed to link visitor:', visitorError);
                 // Non-critical, don't fail signup
             }
         }
