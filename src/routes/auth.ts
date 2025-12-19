@@ -153,6 +153,82 @@ router.post('/signup', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/save-referral-source
+ * Save UTM referral source after successful Supabase signup
+ * This is called from the frontend after signup to attribute the user to a campaign
+ */
+router.post('/save-referral-source', async (req, res) => {
+    try {
+        const {
+            user_id,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            referrer_url,
+            landing_page
+        } = req.body;
+
+        if (!user_id) {
+            return res.status(400).json({ error: 'user_id is required' });
+        }
+
+        // Only save if there's actual UTM data
+        if (!utm_source && !utm_campaign) {
+            return res.json({ success: true, skipped: true, reason: 'No UTM data' });
+        }
+
+        // Find matching campaign if exists
+        let campaignId = null;
+        if (utm_campaign) {
+            const { data: campaign } = await supabaseAdmin
+                .from('marketing_campaigns')
+                .select('id')
+                .eq('utm_campaign', utm_campaign)
+                .single();
+            campaignId = campaign?.id;
+        }
+
+        // Check if referral source already exists for this user
+        const { data: existing } = await supabaseAdmin
+            .from('user_referral_sources')
+            .select('id')
+            .eq('user_id', user_id)
+            .single();
+
+        if (existing) {
+            // Already has a referral source, skip
+            return res.json({ success: true, skipped: true, reason: 'Already exists' });
+        }
+
+        // Save the referral source
+        const { error } = await supabaseAdmin.from('user_referral_sources').insert({
+            user_id,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            referrer_url,
+            landing_page,
+            campaign_id: campaignId
+        });
+
+        if (error) {
+            console.error('Error saving referral source:', error);
+            return res.json({ success: false, error: error.message });
+        }
+
+        res.json({ success: true, campaign_id: campaignId });
+    } catch (error) {
+        console.error('Save referral source error:', error);
+        // Non-critical, return success anyway
+        res.json({ success: false, error: 'Internal error' });
+    }
+});
+
+/**
  * POST /api/auth/login
  * Login user
  */
