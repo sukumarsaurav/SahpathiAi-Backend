@@ -4480,5 +4480,760 @@ router.post('/subscriptions/:id/extend', async (req, res) => {
     }
 });
 
+// =====================================================
+// --- USER DEMOGRAPHICS & SESSION ANALYTICS ---
+// =====================================================
+
+// GET /api/admin/analytics/user-demographics - Device, browser, OS, and location breakdown
+router.get('/analytics/user-demographics', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Get all sessions from last 30 days
+        const { data: sessions, error } = await supabase
+            .from('user_sessions')
+            .select('*')
+            .gt('created_at', thirtyDaysAgo);
+
+        if (error) throw error;
+
+        if (!sessions || sessions.length === 0) {
+            return res.json({
+                device_breakdown: { mobile: 0, tablet: 0, desktop: 0, unknown: 0 },
+                os_breakdown: [],
+                browser_breakdown: [],
+                country_breakdown: [],
+                city_breakdown: [],
+                total_sessions_30d: 0,
+                total_sessions_7d: 0,
+                unique_users_30d: 0,
+                mobile_percentage: 0
+            });
+        }
+
+        // Device breakdown
+        const deviceCounts: Record<string, number> = { mobile: 0, tablet: 0, desktop: 0, unknown: 0 };
+        sessions.forEach((s: any) => {
+            const dt = s.device_type || 'unknown';
+            deviceCounts[dt] = (deviceCounts[dt] || 0) + 1;
+        });
+
+        // OS breakdown
+        const osCounts: Record<string, number> = {};
+        sessions.forEach((s: any) => {
+            const os = s.os || 'Unknown';
+            osCounts[os] = (osCounts[os] || 0) + 1;
+        });
+        const osBreakdown = Object.entries(osCounts)
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        // Browser breakdown
+        const browserCounts: Record<string, number> = {};
+        sessions.forEach((s: any) => {
+            const browser = s.browser || 'Unknown';
+            browserCounts[browser] = (browserCounts[browser] || 0) + 1;
+        });
+        const browserBreakdown = Object.entries(browserCounts)
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        // Country breakdown
+        const countryCounts: Record<string, { name: string; code: string; count: number }> = {};
+        sessions.forEach((s: any) => {
+            if (s.country) {
+                const code = s.country_code || 'XX';
+                if (!countryCounts[code]) {
+                    countryCounts[code] = { name: s.country, code, count: 0 };
+                }
+                countryCounts[code].count++;
+            }
+        });
+        const countryBreakdown = Object.values(countryCounts)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 15);
+
+        // City breakdown (top 10)
+        const cityCounts: Record<string, { city: string; country: string; count: number }> = {};
+        sessions.forEach((s: any) => {
+            if (s.city) {
+                const key = `${s.city}-${s.country_code || 'XX'}`;
+                if (!cityCounts[key]) {
+                    cityCounts[key] = { city: s.city, country: s.country || 'Unknown', count: 0 };
+                }
+                cityCounts[key].count++;
+            }
+        });
+        const cityBreakdown = Object.values(cityCounts)
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 10);
+
+        // Sessions in last 7 days
+        const sessions7d = sessions.filter((s: any) => new Date(s.created_at) > new Date(sevenDaysAgo));
+
+        // Unique users
+        const uniqueUsers = new Set(sessions.map((s: any) => s.user_id)).size;
+
+        // Mobile percentage
+        const mobileCount = deviceCounts.mobile + deviceCounts.tablet;
+        const totalSessions = sessions.length;
+        const mobilePercentage = totalSessions > 0 ? Math.round((mobileCount / totalSessions) * 100) : 0;
+
+        res.json({
+            device_breakdown: deviceCounts,
+            os_breakdown: osBreakdown,
+            browser_breakdown: browserBreakdown,
+            country_breakdown: countryBreakdown,
+            city_breakdown: cityBreakdown,
+            total_sessions_30d: sessions.length,
+            total_sessions_7d: sessions7d.length,
+            unique_users_30d: uniqueUsers,
+            mobile_percentage: mobilePercentage
+        });
+    } catch (error) {
+        console.error('Error fetching user demographics:', error);
+        res.status(500).json({ error: 'Failed to fetch user demographics' });
+    }
+});
+
+// GET /api/admin/analytics/session-trends - Session trends over time
+router.get('/analytics/session-trends', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Get sessions from last 30 days
+        const { data: sessions, error } = await supabase
+            .from('user_sessions')
+            .select('created_at, device_type, is_mobile')
+            .gt('created_at', thirtyDaysAgo);
+
+        if (error) throw error;
+
+        // Group by date and device type
+        const dailyStats: Record<string, { total: number; mobile: number; desktop: number; unique_users: Set<string> }> = {};
+
+        (sessions || []).forEach((s: any) => {
+            const date = new Date(s.created_at).toISOString().split('T')[0];
+            if (!dailyStats[date]) {
+                dailyStats[date] = { total: 0, mobile: 0, desktop: 0, unique_users: new Set() };
+            }
+            dailyStats[date].total++;
+            if (s.is_mobile || s.device_type === 'mobile' || s.device_type === 'tablet') {
+                dailyStats[date].mobile++;
+            } else {
+                dailyStats[date].desktop++;
+            }
+        });
+
+        // Build trend data for last 30 days
+        const trendData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            const stats = dailyStats[dateStr] || { total: 0, mobile: 0, desktop: 0 };
+            trendData.push({
+                date: dateStr,
+                total_sessions: stats.total,
+                mobile_sessions: stats.mobile,
+                desktop_sessions: stats.desktop
+            });
+        }
+
+        // Calculate week-over-week change
+        const thisWeekTotal = trendData.slice(-7).reduce((sum, d) => sum + d.total_sessions, 0);
+        const lastWeekTotal = trendData.slice(-14, -7).reduce((sum, d) => sum + d.total_sessions, 0);
+        const weekOverWeekChange = lastWeekTotal > 0
+            ? Math.round(((thisWeekTotal - lastWeekTotal) / lastWeekTotal) * 100)
+            : 0;
+
+        res.json({
+            trend: trendData,
+            summary: {
+                total_sessions: (sessions || []).length,
+                avg_per_day: Math.round((sessions || []).length / 30),
+                week_over_week_change: weekOverWeekChange
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching session trends:', error);
+        res.status(500).json({ error: 'Failed to fetch session trends' });
+    }
+});
+
+// =====================================================
+// --- MARKETING CAMPAIGNS ---
+// =====================================================
+
+// GET /api/admin/campaigns - List all campaigns
+router.get('/campaigns', async (req, res) => {
+    try {
+        const { status, page = 1, limit = 20 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('marketing_campaigns')
+            .select('*', { count: 'exact' })
+            .order('created_at', { ascending: false })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (status) query = query.eq('status', status);
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+
+        // Get user counts per campaign
+        const campaignIds = (data || []).map((c: any) => c.id);
+        const { data: referralCounts } = await supabase
+            .from('user_referral_sources')
+            .select('campaign_id')
+            .in('campaign_id', campaignIds);
+
+        const countMap: Record<string, number> = {};
+        (referralCounts || []).forEach((r: any) => {
+            countMap[r.campaign_id] = (countMap[r.campaign_id] || 0) + 1;
+        });
+
+        const enrichedData = (data || []).map((c: any) => ({
+            ...c,
+            users_acquired: countMap[c.id] || 0
+        }));
+
+        res.json({
+            campaigns: enrichedData,
+            total: count,
+            page: Number(page),
+            limit: Number(limit),
+            totalPages: Math.ceil((count || 0) / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching campaigns:', error);
+        res.status(500).json({ error: 'Failed to fetch campaigns' });
+    }
+});
+
+// GET /api/admin/campaigns/:id - Get single campaign with stats
+router.get('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const { data: campaign, error } = await supabase
+            .from('marketing_campaigns')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (error) throw error;
+        if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+        // Get expenses
+        const { data: expenses } = await supabase
+            .from('campaign_expenses')
+            .select('*')
+            .eq('campaign_id', id)
+            .order('expense_date', { ascending: false });
+
+        const totalSpent = (expenses || []).reduce((sum: number, e: any) => sum + parseFloat(e.amount || 0), 0);
+
+        // Get referral stats
+        const { data: referrals } = await supabase
+            .from('user_referral_sources')
+            .select('*')
+            .eq('campaign_id', id);
+
+        const usersAcquired = (referrals || []).length;
+        const conversions = (referrals || []).filter((r: any) => r.converted_to_paid).length;
+        const revenue = (referrals || []).reduce((sum: number, r: any) => sum + parseFloat(r.conversion_value || 0), 0);
+        const roi = totalSpent > 0 ? ((revenue - totalSpent) / totalSpent * 100).toFixed(2) : 0;
+
+        res.json({
+            ...campaign,
+            total_spent: totalSpent,
+            users_acquired: usersAcquired,
+            conversions,
+            revenue,
+            roi_percentage: roi,
+            expenses
+        });
+    } catch (error) {
+        console.error('Error fetching campaign:', error);
+        res.status(500).json({ error: 'Failed to fetch campaign' });
+    }
+});
+
+// POST /api/admin/campaigns - Create campaign
+router.post('/campaigns', async (req, res) => {
+    try {
+        const userId = (req as any).user?.id;
+        const {
+            name,
+            description,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            start_date,
+            end_date,
+            budget,
+            status = 'draft',
+            target_signups,
+            target_conversions
+        } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: 'Campaign name is required' });
+        }
+
+        const { data, error } = await supabase
+            .from('marketing_campaigns')
+            .insert({
+                name,
+                description,
+                utm_source,
+                utm_medium,
+                utm_campaign: utm_campaign || name.toLowerCase().replace(/\s+/g, '_'),
+                utm_content,
+                utm_term,
+                start_date,
+                end_date,
+                budget: budget || 0,
+                status,
+                target_signups,
+                target_conversions,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating campaign:', error);
+        res.status(500).json({ error: 'Failed to create campaign' });
+    }
+});
+
+// PUT /api/admin/campaigns/:id - Update campaign
+router.put('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData: any = { ...req.body, updated_at: new Date().toISOString() };
+        delete updateData.id;
+        delete updateData.created_at;
+        delete updateData.created_by;
+
+        const { data, error } = await supabase
+            .from('marketing_campaigns')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating campaign:', error);
+        res.status(500).json({ error: 'Failed to update campaign' });
+    }
+});
+
+// DELETE /api/admin/campaigns/:id - Delete campaign
+router.delete('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('marketing_campaigns').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting campaign:', error);
+        res.status(500).json({ error: 'Failed to delete campaign' });
+    }
+});
+
+// POST /api/admin/campaigns/:id/expenses - Add expense to campaign
+router.post('/campaigns/:id/expenses', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = (req as any).user?.id;
+        const { expense_date, amount, category, description, platform, invoice_reference } = req.body;
+
+        if (!amount || !expense_date) {
+            return res.status(400).json({ error: 'Amount and expense_date are required' });
+        }
+
+        const { data, error } = await supabase
+            .from('campaign_expenses')
+            .insert({
+                campaign_id: id,
+                expense_date,
+                amount,
+                category,
+                description,
+                platform,
+                invoice_reference,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error adding expense:', error);
+        res.status(500).json({ error: 'Failed to add expense' });
+    }
+});
+
+// GET /api/admin/campaigns/:id/generate-link - Generate UTM tracking link
+router.get('/campaigns/:id/generate-link', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { base_url = 'https://sahpathai.com' } = req.query;
+
+        const { data: campaign, error } = await supabase
+            .from('marketing_campaigns')
+            .select('utm_source, utm_medium, utm_campaign, utm_content, utm_term')
+            .eq('id', id)
+            .single();
+
+        if (error || !campaign) {
+            return res.status(404).json({ error: 'Campaign not found' });
+        }
+
+        const params = new URLSearchParams();
+        if (campaign.utm_source) params.append('utm_source', campaign.utm_source);
+        if (campaign.utm_medium) params.append('utm_medium', campaign.utm_medium);
+        if (campaign.utm_campaign) params.append('utm_campaign', campaign.utm_campaign);
+        if (campaign.utm_content) params.append('utm_content', campaign.utm_content);
+        if (campaign.utm_term) params.append('utm_term', campaign.utm_term);
+
+        const trackingLink = `${base_url}?${params.toString()}`;
+
+        res.json({ tracking_link: trackingLink, utm_params: campaign });
+    } catch (error) {
+        console.error('Error generating link:', error);
+        res.status(500).json({ error: 'Failed to generate tracking link' });
+    }
+});
+
+// =====================================================
+// --- REFERRAL & CAMPAIGN ANALYTICS ---
+// =====================================================
+
+// GET /api/admin/analytics/referral-sources - Breakdown by source
+router.get('/analytics/referral-sources', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        const { data: referrals, error } = await supabase
+            .from('user_referral_sources')
+            .select('*')
+            .gt('created_at', thirtyDaysAgo);
+
+        if (error) throw error;
+
+        // Group by source
+        const sourceBreakdown: Record<string, { count: number; conversions: number; revenue: number }> = {};
+        (referrals || []).forEach((r: any) => {
+            const source = r.utm_source || 'direct';
+            if (!sourceBreakdown[source]) {
+                sourceBreakdown[source] = { count: 0, conversions: 0, revenue: 0 };
+            }
+            sourceBreakdown[source].count++;
+            if (r.converted_to_paid) {
+                sourceBreakdown[source].conversions++;
+                sourceBreakdown[source].revenue += parseFloat(r.conversion_value || 0);
+            }
+        });
+
+        const sourceData = Object.entries(sourceBreakdown)
+            .map(([source, data]) => ({
+                source,
+                users: data.count,
+                conversions: data.conversions,
+                revenue: data.revenue,
+                conversion_rate: data.count > 0 ? ((data.conversions / data.count) * 100).toFixed(1) : 0
+            }))
+            .sort((a, b) => b.users - a.users);
+
+        // Group by medium
+        const mediumBreakdown: Record<string, number> = {};
+        (referrals || []).forEach((r: any) => {
+            const medium = r.utm_medium || 'unknown';
+            mediumBreakdown[medium] = (mediumBreakdown[medium] || 0) + 1;
+        });
+
+        const mediumData = Object.entries(mediumBreakdown)
+            .map(([medium, count]) => ({ medium, count }))
+            .sort((a, b) => b.count - a.count);
+
+        // Daily trend
+        const dailyCounts: Record<string, Record<string, number>> = {};
+        (referrals || []).forEach((r: any) => {
+            const date = new Date(r.created_at).toISOString().split('T')[0];
+            const source = r.utm_source || 'direct';
+            if (!dailyCounts[date]) dailyCounts[date] = {};
+            dailyCounts[date][source] = (dailyCounts[date][source] || 0) + 1;
+        });
+
+        const trendData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            trendData.push({
+                date: dateStr,
+                ...dailyCounts[dateStr] || {}
+            });
+        }
+
+        res.json({
+            by_source: sourceData,
+            by_medium: mediumData,
+            daily_trend: trendData,
+            total_users: (referrals || []).length,
+            total_conversions: (referrals || []).filter((r: any) => r.converted_to_paid).length
+        });
+    } catch (error) {
+        console.error('Error fetching referral sources:', error);
+        res.status(500).json({ error: 'Failed to fetch referral sources' });
+    }
+});
+
+// GET /api/admin/analytics/campaign-roi - Campaign performance with ROI
+router.get('/analytics/campaign-roi', async (req, res) => {
+    try {
+        // Get all active/completed campaigns
+        const { data: campaigns, error } = await supabase
+            .from('marketing_campaigns')
+            .select('*')
+            .in('status', ['active', 'completed', 'paused'])
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        const roiData = await Promise.all((campaigns || []).map(async (c: any) => {
+            // Get expenses
+            const { data: expenses } = await supabase
+                .from('campaign_expenses')
+                .select('amount')
+                .eq('campaign_id', c.id);
+
+            const totalSpent = (expenses || []).reduce((sum: number, e: any) => sum + parseFloat(e.amount || 0), 0);
+
+            // Get referrals
+            const { data: referrals } = await supabase
+                .from('user_referral_sources')
+                .select('converted_to_paid, conversion_value')
+                .eq('campaign_id', c.id);
+
+            const usersAcquired = (referrals || []).length;
+            const conversions = (referrals || []).filter((r: any) => r.converted_to_paid).length;
+            const revenue = (referrals || []).reduce((sum: number, r: any) => sum + parseFloat(r.conversion_value || 0), 0);
+            const roi = totalSpent > 0 ? ((revenue - totalSpent) / totalSpent * 100) : 0;
+            const cpa = usersAcquired > 0 ? totalSpent / usersAcquired : 0;
+
+            return {
+                id: c.id,
+                name: c.name,
+                status: c.status,
+                utm_source: c.utm_source,
+                budget: parseFloat(c.budget || 0),
+                total_spent: totalSpent,
+                users_acquired: usersAcquired,
+                conversions,
+                revenue,
+                roi_percentage: roi.toFixed(2),
+                cost_per_acquisition: cpa.toFixed(2),
+                start_date: c.start_date,
+                end_date: c.end_date
+            };
+        }));
+
+        // Summary stats
+        const totalBudget = roiData.reduce((sum, c) => sum + c.budget, 0);
+        const totalSpent = roiData.reduce((sum, c) => sum + c.total_spent, 0);
+        const totalUsers = roiData.reduce((sum, c) => sum + c.users_acquired, 0);
+        const totalRevenue = roiData.reduce((sum, c) => sum + c.revenue, 0);
+        const overallROI = totalSpent > 0 ? ((totalRevenue - totalSpent) / totalSpent * 100) : 0;
+
+        res.json({
+            campaigns: roiData,
+            summary: {
+                total_budget: totalBudget,
+                total_spent: totalSpent,
+                total_users_acquired: totalUsers,
+                total_revenue: totalRevenue,
+                overall_roi: overallROI.toFixed(2)
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching campaign ROI:', error);
+        res.status(500).json({ error: 'Failed to fetch campaign ROI' });
+    }
+});
+
+// =====================================================
+// --- SOCIAL POSTS ---
+// =====================================================
+
+// GET /api/admin/social/posts - List social posts
+router.get('/social/posts', async (req, res) => {
+    try {
+        const { status, campaign_id, page = 1, limit = 20 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('social_posts')
+            .select('*, campaign:marketing_campaigns(id, name)', { count: 'exact' })
+            .order('created_at', { ascending: false })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (status) query = query.eq('status', status);
+        if (campaign_id) query = query.eq('campaign_id', campaign_id);
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+
+        res.json({
+            posts: data,
+            total: count,
+            page: Number(page),
+            limit: Number(limit)
+        });
+    } catch (error) {
+        console.error('Error fetching social posts:', error);
+        res.status(500).json({ error: 'Failed to fetch social posts' });
+    }
+});
+
+// POST /api/admin/social/posts - Create social post
+router.post('/social/posts', async (req, res) => {
+    try {
+        const userId = (req as any).user?.id;
+        const {
+            title,
+            content,
+            media_urls,
+            link_url,
+            call_to_action,
+            platforms,
+            scheduled_at,
+            campaign_id,
+            status = 'draft'
+        } = req.body;
+
+        if (!content || !platforms?.length) {
+            return res.status(400).json({ error: 'Content and platforms are required' });
+        }
+
+        const { data, error } = await supabase
+            .from('social_posts')
+            .insert({
+                title,
+                content,
+                media_urls: media_urls || [],
+                link_url,
+                call_to_action,
+                platforms,
+                scheduled_at,
+                campaign_id,
+                status: scheduled_at ? 'scheduled' : status,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating social post:', error);
+        res.status(500).json({ error: 'Failed to create social post' });
+    }
+});
+
+// PUT /api/admin/social/posts/:id - Update social post
+router.put('/social/posts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData: any = { ...req.body, updated_at: new Date().toISOString() };
+        delete updateData.id;
+        delete updateData.created_at;
+        delete updateData.created_by;
+
+        const { data, error } = await supabase
+            .from('social_posts')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating social post:', error);
+        res.status(500).json({ error: 'Failed to update social post' });
+    }
+});
+
+// DELETE /api/admin/social/posts/:id - Delete social post
+router.delete('/social/posts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('social_posts').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting social post:', error);
+        res.status(500).json({ error: 'Failed to delete social post' });
+    }
+});
+
+// POST /api/admin/social/posts/:id/publish - Publish post now (placeholder for Meta API)
+router.post('/social/posts/:id/publish', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Get the post
+        const { data: post, error: fetchError } = await supabase
+            .from('social_posts')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !post) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+
+        // TODO: Implement actual Meta API publishing here
+        // For now, just update the status
+
+        const { data, error } = await supabase
+            .from('social_posts')
+            .update({
+                status: 'published',
+                published_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({
+            success: true,
+            post: data,
+            message: 'Post marked as published. Connect Meta API for actual publishing.'
+        });
+    } catch (error) {
+        console.error('Error publishing post:', error);
+        res.status(500).json({ error: 'Failed to publish post' });
+    }
+});
+
 export default router;
 

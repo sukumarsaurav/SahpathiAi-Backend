@@ -686,6 +686,135 @@ CREATE TABLE IF NOT EXISTS admin_settings (
 );
 
 -- =====================================================
+-- USER ANALYTICS TABLES
+-- =====================================================
+
+-- User Sessions (Device & Location Tracking)
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  session_id VARCHAR(64) NOT NULL,
+  device_type VARCHAR(20) CHECK (device_type IN ('mobile', 'tablet', 'desktop', 'unknown')),
+  os VARCHAR(50),
+  os_version VARCHAR(20),
+  browser VARCHAR(50),
+  browser_version VARCHAR(20),
+  ip_address INET,
+  country VARCHAR(100),
+  country_code VARCHAR(2),
+  region VARCHAR(100),
+  city VARCHAR(100),
+  timezone VARCHAR(50),
+  user_agent TEXT,
+  is_mobile BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
+-- MARKETING & SOCIAL MEDIA TABLES
+-- =====================================================
+
+-- Marketing Campaigns
+CREATE TABLE IF NOT EXISTS marketing_campaigns (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(100) NOT NULL,
+  description TEXT,
+  utm_source VARCHAR(50),
+  utm_medium VARCHAR(50),
+  utm_campaign VARCHAR(100),
+  utm_content VARCHAR(100),
+  utm_term VARCHAR(100),
+  start_date DATE,
+  end_date DATE,
+  budget DECIMAL(12,2) DEFAULT 0,
+  currency VARCHAR(3) DEFAULT 'INR',
+  status VARCHAR(20) DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'paused', 'completed', 'archived')),
+  target_signups INTEGER,
+  target_conversions INTEGER,
+  created_by UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Campaign Expenses
+CREATE TABLE IF NOT EXISTS campaign_expenses (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  campaign_id UUID REFERENCES marketing_campaigns(id) ON DELETE CASCADE,
+  expense_date DATE NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  currency VARCHAR(3) DEFAULT 'INR',
+  category VARCHAR(50),
+  description TEXT,
+  platform VARCHAR(50),
+  invoice_reference VARCHAR(100),
+  created_by UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- User Referral Sources
+CREATE TABLE IF NOT EXISTS user_referral_sources (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  utm_source VARCHAR(50),
+  utm_medium VARCHAR(50),
+  utm_campaign VARCHAR(100),
+  utm_content VARCHAR(100),
+  utm_term VARCHAR(100),
+  referrer_url TEXT,
+  landing_page TEXT,
+  campaign_id UUID REFERENCES marketing_campaigns(id),
+  device_type VARCHAR(20),
+  country VARCHAR(100),
+  converted_to_paid BOOLEAN DEFAULT false,
+  conversion_date TIMESTAMPTZ,
+  conversion_value DECIMAL(12,2),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Social Accounts
+CREATE TABLE IF NOT EXISTS social_accounts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  platform VARCHAR(50) NOT NULL CHECK (platform IN ('facebook', 'instagram', 'whatsapp')),
+  account_name VARCHAR(100),
+  account_id VARCHAR(100),
+  access_token TEXT,
+  refresh_token TEXT,
+  token_expires_at TIMESTAMPTZ,
+  page_id VARCHAR(100),
+  instagram_account_id VARCHAR(100),
+  whatsapp_business_id VARCHAR(100),
+  is_active BOOLEAN DEFAULT true,
+  last_sync_at TIMESTAMPTZ,
+  connected_by UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Social Posts
+CREATE TABLE IF NOT EXISTS social_posts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title VARCHAR(200),
+  content TEXT NOT NULL,
+  media_urls TEXT[],
+  link_url TEXT,
+  call_to_action VARCHAR(50),
+  platforms TEXT[] NOT NULL,
+  scheduled_at TIMESTAMPTZ,
+  published_at TIMESTAMPTZ,
+  status VARCHAR(20) DEFAULT 'draft' CHECK (status IN ('draft', 'scheduled', 'publishing', 'published', 'failed', 'deleted')),
+  campaign_id UUID REFERENCES marketing_campaigns(id),
+  platform_post_ids JSONB,
+  error_message TEXT,
+  engagement_data JSONB,
+  reach INTEGER,
+  impressions INTEGER,
+  clicks INTEGER,
+  created_by UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
 -- INDEXES FOR PERFORMANCE
 -- =====================================================
 

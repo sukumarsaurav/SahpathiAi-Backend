@@ -240,4 +240,196 @@ router.get('/me', async (req, res) => {
     }
 });
 
+/**
+ * POST /api/auth/track-session
+ * Track user session with device and location info
+ * Called from frontend after successful login/app load
+ */
+router.post('/track-session', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader?.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+
+        const token = authHeader.substring(7);
+        const { data: { user }, error } = await supabase.auth.getUser(token);
+
+        if (error || !user) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        // Get User-Agent and IP
+        const userAgent = req.headers['user-agent'] || '';
+        const forwarded = req.headers['x-forwarded-for'];
+        const ip = forwarded
+            ? (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : forwarded[0])
+            : req.socket.remoteAddress || '';
+
+        // Parse User-Agent for device info
+        const deviceInfo = parseUserAgent(userAgent);
+
+        // Generate unique session ID
+        const sessionId = `${user.id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        // Get geolocation from IP (using ip-api.com - free, no API key needed)
+        let geoData: {
+            country: string | null;
+            countryCode: string | null;
+            region: string | null;
+            city: string | null;
+            timezone: string | null;
+        } = {
+            country: null,
+            countryCode: null,
+            region: null,
+            city: null,
+            timezone: null
+        };
+
+        // Only fetch geo data if we have a valid public IP (not localhost)
+        if (ip && !ip.startsWith('127.') && !ip.startsWith('192.168.') && !ip.startsWith('10.') && ip !== '::1') {
+            try {
+                const geoResponse = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,countryCode,regionName,city,timezone`);
+                if (geoResponse.ok) {
+                    const geo = await geoResponse.json() as {
+                        status: string;
+                        country?: string;
+                        countryCode?: string;
+                        regionName?: string;
+                        city?: string;
+                        timezone?: string;
+                    };
+                    if (geo.status === 'success') {
+                        geoData = {
+                            country: geo.country || null,
+                            countryCode: geo.countryCode || null,
+                            region: geo.regionName || null,
+                            city: geo.city || null,
+                            timezone: geo.timezone || null
+                        };
+                    }
+                }
+            } catch (geoError) {
+                console.log('Geolocation fetch failed (non-critical):', geoError);
+            }
+        }
+
+        // Insert session record
+        const { error: insertError } = await supabaseAdmin
+            .from('user_sessions')
+            .insert({
+                user_id: user.id,
+                session_id: sessionId,
+                device_type: deviceInfo.deviceType,
+                os: deviceInfo.os,
+                os_version: deviceInfo.osVersion,
+                browser: deviceInfo.browser,
+                browser_version: deviceInfo.browserVersion,
+                ip_address: ip || null,
+                country: geoData.country,
+                country_code: geoData.countryCode,
+                region: geoData.region,
+                city: geoData.city,
+                timezone: geoData.timezone,
+                user_agent: userAgent,
+                is_mobile: deviceInfo.isMobile
+            });
+
+        if (insertError) {
+            console.error('Session tracking insert error:', insertError);
+            // Don't fail the request - session tracking is non-critical
+        }
+
+        res.json({ success: true, sessionId });
+    } catch (error) {
+        console.error('Track session error:', error);
+        // Return success anyway - don't break user experience for analytics
+        res.json({ success: false, error: 'Failed to track session' });
+    }
+});
+
+/**
+ * Parse User-Agent string to extract device, OS, and browser info
+ */
+function parseUserAgent(ua: string): {
+    deviceType: 'mobile' | 'tablet' | 'desktop' | 'unknown';
+    os: string;
+    osVersion: string;
+    browser: string;
+    browserVersion: string;
+    isMobile: boolean;
+} {
+    const result = {
+        deviceType: 'unknown' as 'mobile' | 'tablet' | 'desktop' | 'unknown',
+        os: 'Unknown',
+        osVersion: '',
+        browser: 'Unknown',
+        browserVersion: '',
+        isMobile: false
+    };
+
+    // Detect device type
+    if (/iPad|tablet|Tablet/i.test(ua)) {
+        result.deviceType = 'tablet';
+    } else if (/Mobile|Android|iPhone|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua)) {
+        result.deviceType = 'mobile';
+        result.isMobile = true;
+    } else if (ua) {
+        result.deviceType = 'desktop';
+    }
+
+    // Detect OS
+    if (/Windows NT 10/i.test(ua)) {
+        result.os = 'Windows';
+        result.osVersion = ua.includes('Windows NT 10.0') ? '10/11' : '10';
+    } else if (/Windows NT/i.test(ua)) {
+        result.os = 'Windows';
+        const match = ua.match(/Windows NT (\d+\.\d+)/);
+        result.osVersion = match ? match[1] : '';
+    } else if (/Mac OS X/i.test(ua)) {
+        result.os = 'macOS';
+        const match = ua.match(/Mac OS X (\d+[._]\d+)/);
+        result.osVersion = match ? match[1].replace('_', '.') : '';
+    } else if (/iPhone OS|iPad.*OS/i.test(ua)) {
+        result.os = 'iOS';
+        const match = ua.match(/(?:iPhone|iPad).*OS (\d+_\d+)/);
+        result.osVersion = match ? match[1].replace('_', '.') : '';
+    } else if (/Android/i.test(ua)) {
+        result.os = 'Android';
+        const match = ua.match(/Android (\d+(\.\d+)?)/);
+        result.osVersion = match ? match[1] : '';
+    } else if (/Linux/i.test(ua)) {
+        result.os = 'Linux';
+    } else if (/CrOS/i.test(ua)) {
+        result.os = 'ChromeOS';
+    }
+
+    // Detect browser
+    if (/Edg\//i.test(ua)) {
+        result.browser = 'Edge';
+        const match = ua.match(/Edg\/(\d+(\.\d+)?)/);
+        result.browserVersion = match ? match[1] : '';
+    } else if (/Chrome/i.test(ua) && !/Chromium/i.test(ua)) {
+        result.browser = 'Chrome';
+        const match = ua.match(/Chrome\/(\d+(\.\d+)?)/);
+        result.browserVersion = match ? match[1] : '';
+    } else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) {
+        result.browser = 'Safari';
+        const match = ua.match(/Version\/(\d+(\.\d+)?)/);
+        result.browserVersion = match ? match[1] : '';
+    } else if (/Firefox/i.test(ua)) {
+        result.browser = 'Firefox';
+        const match = ua.match(/Firefox\/(\d+(\.\d+)?)/);
+        result.browserVersion = match ? match[1] : '';
+    } else if (/Opera|OPR/i.test(ua)) {
+        result.browser = 'Opera';
+        const match = ua.match(/(?:Opera|OPR)\/(\d+(\.\d+)?)/);
+        result.browserVersion = match ? match[1] : '';
+    }
+
+    return result;
+}
+
 export default router;
+
