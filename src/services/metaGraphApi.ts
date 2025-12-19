@@ -14,9 +14,7 @@ const META_OAUTH_URL = 'https://www.facebook.com/' + META_GRAPH_VERSION;
 // require Facebook App Review to use with non-admin users
 const FACEBOOK_PERMISSIONS = [
     'pages_show_list',        // View list of Pages user manages
-    'pages_read_engagement',  // Read Page engagement data
-    'public_profile',         // Basic profile info (always granted)
-    'email'                   // User's email (optional)
+    'pages_read_engagement'   // Read Page engagement data
 ].join(',');
 
 export interface MetaTokenResponse {
