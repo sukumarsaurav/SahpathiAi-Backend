@@ -9,7 +9,22 @@ const router = Router();
  */
 router.post('/signup', async (req, res) => {
     try {
-        const { email, password, full_name, preferred_language_id, target_exam_id, referral_code } = req.body;
+        const {
+            email,
+            password,
+            full_name,
+            preferred_language_id,
+            target_exam_id,
+            referral_code,
+            // UTM parameters for marketing attribution
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            referrer_url,
+            landing_page
+        } = req.body;
 
         // Create auth user
         const { data: authData, error: authError } = await supabase.auth.signUp({
@@ -72,6 +87,37 @@ router.post('/signup', async (req, res) => {
                     status: 'pending',
                     reward_amount: 15.00
                 });
+            }
+        }
+
+        // Track marketing referral source if UTM params provided
+        if (utm_source || utm_medium || utm_campaign) {
+            try {
+                // Find matching campaign if exists
+                let campaignId = null;
+                if (utm_campaign) {
+                    const { data: campaign } = await supabaseAdmin
+                        .from('marketing_campaigns')
+                        .select('id')
+                        .eq('utm_campaign', utm_campaign)
+                        .single();
+                    campaignId = campaign?.id;
+                }
+
+                await supabaseAdmin.from('user_referral_sources').insert({
+                    user_id: authData.user.id,
+                    utm_source,
+                    utm_medium,
+                    utm_campaign,
+                    utm_content,
+                    utm_term,
+                    referrer_url,
+                    landing_page,
+                    campaign_id: campaignId
+                });
+            } catch (utmError) {
+                console.error('Failed to track referral source:', utmError);
+                // Non-critical, don't fail signup
             }
         }
 
