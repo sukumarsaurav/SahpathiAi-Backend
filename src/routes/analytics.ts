@@ -473,17 +473,130 @@ router.get('/all-tests', authenticate, async (req, res) => {
 
 /**
  * GET /api/analytics/streak
- * Get streak information
+ * Get streak information - dynamically calculated from all activity sources
  */
 router.get('/streak', authenticate, async (req, res) => {
     try {
-        const { data: stats } = await supabaseAdmin
-            .from('user_stats')
-            .select('current_streak, best_streak, last_activity')
-            .eq('user_id', req.user!.id)
-            .single();
+        const userId = req.user!.id;
+        const activityDates = new Set<string>();
 
-        res.json(stats || { current_streak: 0, best_streak: 0 });
+        // 1. Daily Practice (completed sessions)
+        const { data: dailySessions } = await supabaseAdmin
+            .from('daily_practice_sessions')
+            .select('started_at')
+            .eq('user_id', userId)
+            .eq('status', 'completed');
+
+        dailySessions?.forEach(s => {
+            activityDates.add(new Date(s.started_at).toISOString().split('T')[0]);
+        });
+
+        // 2. Custom Tests (completed)
+        const { data: customTests } = await supabaseAdmin
+            .from('custom_tests')
+            .select('completed_at')
+            .eq('user_id', userId)
+            .eq('status', 'completed')
+            .not('completed_at', 'is', null);
+
+        customTests?.forEach(t => {
+            activityDates.add(new Date(t.completed_at).toISOString().split('T')[0]);
+        });
+
+        // 3. Regular Test Attempts (completed)
+        const { data: testAttempts } = await supabaseAdmin
+            .from('test_attempts')
+            .select('completed_at')
+            .eq('user_id', userId)
+            .not('completed_at', 'is', null);
+
+        testAttempts?.forEach(a => {
+            activityDates.add(new Date(a.completed_at).toISOString().split('T')[0]);
+        });
+
+        // 4. Marathon Sessions (with at least one answer)
+        const { data: marathonSessions } = await supabaseAdmin
+            .from('marathon_sessions')
+            .select('started_at, questions_answered')
+            .eq('user_id', userId)
+            .gt('questions_answered', 0);
+
+        marathonSessions?.forEach(s => {
+            activityDates.add(new Date(s.started_at).toISOString().split('T')[0]);
+        });
+
+        // Sort dates descending (most recent first)
+        const sortedDates = Array.from(activityDates).sort((a, b) =>
+            new Date(b).getTime() - new Date(a).getTime()
+        );
+
+        if (sortedDates.length === 0) {
+            return res.json({ current_streak: 0, longest_streak: 0, last_activity_date: null });
+        }
+
+        // Calculate streaks
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let currentStreak = 0;
+        let longestStreak = 0;
+        let tempStreak = 0;
+        let lastDate: Date | null = null;
+
+        for (const dateStr of sortedDates) {
+            const activityDate = new Date(dateStr);
+            activityDate.setHours(0, 0, 0, 0);
+
+            if (!lastDate) {
+                // First date - check if it's today or yesterday to start current streak
+                const daysDiff = Math.floor((today.getTime() - activityDate.getTime()) / (1000 * 60 * 60 * 24));
+                if (daysDiff <= 1) {
+                    tempStreak = 1;
+                    currentStreak = 1;
+                } else {
+                    // Most recent activity is older than yesterday - no current streak
+                    tempStreak = 1;
+                    currentStreak = 0;
+                }
+                lastDate = activityDate;
+            } else {
+                // Check if this date is exactly 1 day before lastDate
+                const daysDiff = Math.floor((lastDate.getTime() - activityDate.getTime()) / (1000 * 60 * 60 * 24));
+                if (daysDiff === 1) {
+                    tempStreak++;
+                    if (currentStreak > 0) {
+                        currentStreak = tempStreak;
+                    }
+                } else if (daysDiff > 1) {
+                    // Gap found - save longest if applicable and reset
+                    longestStreak = Math.max(longestStreak, tempStreak);
+                    tempStreak = 1;
+                }
+                // daysDiff === 0 means same date (skip, already counted)
+                if (daysDiff >= 1) {
+                    lastDate = activityDate;
+                }
+            }
+        }
+
+        // Final check for longest streak
+        longestStreak = Math.max(longestStreak, tempStreak);
+
+        // Cache the calculated streak in user_stats for quick dashboard access
+        await supabaseAdmin
+            .from('user_stats')
+            .upsert({
+                user_id: userId,
+                current_streak: currentStreak,
+                best_streak: Math.max(longestStreak, currentStreak),
+                last_activity: sortedDates[0]
+            }, { onConflict: 'user_id' });
+
+        res.json({
+            current_streak: currentStreak,
+            longest_streak: Math.max(longestStreak, currentStreak),
+            last_activity_date: sortedDates[0]
+        });
     } catch (error) {
         console.error('Get streak error:', error);
         res.status(500).json({ error: 'Failed to fetch streak' });
