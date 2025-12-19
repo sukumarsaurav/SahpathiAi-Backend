@@ -113,7 +113,7 @@ app.use('/api/resources', resourceRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/track', trackingRoutes);
-app.use('/api/admin/social', socialRoutes);
+app.use('/api/social', socialRoutes);  // Not under /api/admin - OAuth callback needs to be public
 
 // Error handling middleware
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
