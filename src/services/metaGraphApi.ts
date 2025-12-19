@@ -9,17 +9,14 @@ const META_GRAPH_VERSION = 'v18.0';
 const META_GRAPH_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const META_OAUTH_URL = 'https://www.facebook.com/' + META_GRAPH_VERSION;
 
-// Required permissions for full functionality
+// Permissions available without App Review (for development/testing)
+// Note: Advanced permissions like pages_manage_posts, instagram_content_publish
+// require Facebook App Review to use with non-admin users
 const FACEBOOK_PERMISSIONS = [
-    'pages_show_list',
-    'pages_read_engagement',
-    'pages_manage_posts',
-    'pages_read_user_content',
-    'instagram_basic',
-    'instagram_content_publish',
-    'instagram_manage_comments',
-    'instagram_manage_insights',
-    'business_management'
+    'pages_show_list',        // View list of Pages user manages
+    'pages_read_engagement',  // Read Page engagement data
+    'public_profile',         // Basic profile info (always granted)
+    'email'                   // User's email (optional)
 ].join(',');
 
 export interface MetaTokenResponse {
