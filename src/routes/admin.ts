@@ -5435,5 +5435,613 @@ router.post('/social/posts/:id/publish', async (req, res) => {
     }
 });
 
+// =====================================================
+// --- CHATBOT MANAGEMENT ---
+// =====================================================
+
+import * as chatbotService from '../services/chatbot';
+
+// GET /api/admin/chatbot/agents - List all chatbot agents
+router.get('/chatbot/agents', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('chatbot_agents')
+            .select(`
+                *,
+                default_language:languages(id, code, name)
+            `)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching chatbot agents:', error);
+        res.status(500).json({ error: 'Failed to fetch chatbot agents' });
+    }
+});
+
+// GET /api/admin/chatbot/agents/:id - Get single agent
+router.get('/chatbot/agents/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data, error } = await supabase
+            .from('chatbot_agents')
+            .select(`
+                *,
+                default_language:languages(id, code, name)
+            `)
+            .eq('id', id)
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching chatbot agent:', error);
+        res.status(500).json({ error: 'Failed to fetch chatbot agent' });
+    }
+});
+
+// POST /api/admin/chatbot/agents - Create chatbot agent
+router.post('/chatbot/agents', async (req, res) => {
+    try {
+        const userId = (req as any).user?.id;
+        const {
+            name,
+            avatar_url,
+            description,
+            system_prompt,
+            welcome_message,
+            default_language_id,
+            supported_language_ids,
+            personality_traits,
+            policy_category_ids,
+            is_active = true
+        } = req.body;
+
+        if (!name || !system_prompt) {
+            return res.status(400).json({ error: 'Name and system prompt are required' });
+        }
+
+        const { data, error } = await supabase
+            .from('chatbot_agents')
+            .insert({
+                name,
+                avatar_url,
+                description,
+                system_prompt,
+                welcome_message: welcome_message || 'Hello! How can I help you today?',
+                default_language_id,
+                supported_language_ids: supported_language_ids || [],
+                personality_traits: personality_traits || {},
+                policy_category_ids,
+                is_active,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating chatbot agent:', error);
+        res.status(500).json({ error: 'Failed to create chatbot agent' });
+    }
+});
+
+// PUT /api/admin/chatbot/agents/:id - Update chatbot agent
+router.put('/chatbot/agents/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData: any = { ...req.body, updated_at: new Date().toISOString() };
+        delete updateData.id;
+        delete updateData.created_at;
+        delete updateData.created_by;
+
+        const { data, error } = await supabase
+            .from('chatbot_agents')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating chatbot agent:', error);
+        res.status(500).json({ error: 'Failed to update chatbot agent' });
+    }
+});
+
+// DELETE /api/admin/chatbot/agents/:id - Delete chatbot agent
+router.delete('/chatbot/agents/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('chatbot_agents').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting chatbot agent:', error);
+        res.status(500).json({ error: 'Failed to delete chatbot agent' });
+    }
+});
+
+// --- POLICY CATEGORIES ---
+
+// GET /api/admin/chatbot/policy-categories
+router.get('/chatbot/policy-categories', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('policy_categories')
+            .select('*')
+            .order('display_order');
+
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching policy categories:', error);
+        res.status(500).json({ error: 'Failed to fetch policy categories' });
+    }
+});
+
+// POST /api/admin/chatbot/policy-categories
+router.post('/chatbot/policy-categories', async (req, res) => {
+    try {
+        const { name, description, icon, display_order } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: 'Name is required' });
+        }
+
+        const { data, error } = await supabase
+            .from('policy_categories')
+            .insert({ name, description, icon, display_order })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating policy category:', error);
+        res.status(500).json({ error: 'Failed to create policy category' });
+    }
+});
+
+// PUT /api/admin/chatbot/policy-categories/:id
+router.put('/chatbot/policy-categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, description, icon, display_order, is_active } = req.body;
+
+        const { data, error } = await supabase
+            .from('policy_categories')
+            .update({ name, description, icon, display_order, is_active })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating policy category:', error);
+        res.status(500).json({ error: 'Failed to update policy category' });
+    }
+});
+
+// DELETE /api/admin/chatbot/policy-categories/:id
+router.delete('/chatbot/policy-categories/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('policy_categories').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting policy category:', error);
+        res.status(500).json({ error: 'Failed to delete policy category' });
+    }
+});
+
+// --- COMPANY POLICIES ---
+
+// GET /api/admin/chatbot/policies
+router.get('/chatbot/policies', async (req, res) => {
+    try {
+        const { category_id } = req.query;
+
+        let query = supabase
+            .from('company_policies')
+            .select(`
+                *,
+                category:policy_categories(id, name),
+                language:languages(id, code, name)
+            `)
+            .order('priority', { ascending: false });
+
+        if (category_id) query = query.eq('category_id', category_id);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching policies:', error);
+        res.status(500).json({ error: 'Failed to fetch policies' });
+    }
+});
+
+// POST /api/admin/chatbot/policies
+router.post('/chatbot/policies', async (req, res) => {
+    try {
+        const userId = (req as any).user?.id;
+        const { category_id, title, content, language_id, priority, is_active = true } = req.body;
+
+        if (!title || !content) {
+            return res.status(400).json({ error: 'Title and content are required' });
+        }
+
+        const { data, error } = await supabase
+            .from('company_policies')
+            .insert({
+                category_id,
+                title,
+                content,
+                language_id,
+                priority: priority || 0,
+                is_active,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating policy:', error);
+        res.status(500).json({ error: 'Failed to create policy' });
+    }
+});
+
+// PUT /api/admin/chatbot/policies/:id
+router.put('/chatbot/policies/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData: any = { ...req.body, updated_at: new Date().toISOString() };
+        delete updateData.id;
+        delete updateData.created_at;
+        delete updateData.created_by;
+
+        const { data, error } = await supabase
+            .from('company_policies')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating policy:', error);
+        res.status(500).json({ error: 'Failed to update policy' });
+    }
+});
+
+// DELETE /api/admin/chatbot/policies/:id
+router.delete('/chatbot/policies/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('company_policies').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting policy:', error);
+        res.status(500).json({ error: 'Failed to delete policy' });
+    }
+});
+
+// --- KNOWLEDGE DOCUMENTS ---
+
+// GET /api/admin/chatbot/knowledge-docs
+router.get('/chatbot/knowledge-docs', async (req, res) => {
+    try {
+        const { agent_id } = req.query;
+
+        let query = supabase
+            .from('knowledge_documents')
+            .select(`
+                *,
+                agent:chatbot_agents(id, name)
+            `)
+            .order('created_at', { ascending: false });
+
+        if (agent_id) query = query.eq('agent_id', agent_id);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching knowledge docs:', error);
+        res.status(500).json({ error: 'Failed to fetch knowledge documents' });
+    }
+});
+
+// POST /api/admin/chatbot/knowledge-docs
+router.post('/chatbot/knowledge-docs', async (req, res) => {
+    try {
+        const userId = (req as any).user?.id;
+        const { agent_id, title, file_url, file_type, file_size_bytes, extracted_content } = req.body;
+
+        if (!title) {
+            return res.status(400).json({ error: 'Title is required' });
+        }
+
+        const { data, error } = await supabase
+            .from('knowledge_documents')
+            .insert({
+                agent_id,
+                title,
+                file_url,
+                file_type,
+                file_size_bytes,
+                extracted_content,
+                is_processed: !!extracted_content,
+                created_by: userId
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating knowledge doc:', error);
+        res.status(500).json({ error: 'Failed to create knowledge document' });
+    }
+});
+
+// PUT /api/admin/chatbot/knowledge-docs/:id
+router.put('/chatbot/knowledge-docs/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData: any = { ...req.body };
+        delete updateData.id;
+        delete updateData.created_at;
+        delete updateData.created_by;
+
+        // If extracted_content is provided, mark as processed
+        if (updateData.extracted_content) {
+            updateData.is_processed = true;
+        }
+
+        const { data, error } = await supabase
+            .from('knowledge_documents')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating knowledge doc:', error);
+        res.status(500).json({ error: 'Failed to update knowledge document' });
+    }
+});
+
+// DELETE /api/admin/chatbot/knowledge-docs/:id
+router.delete('/chatbot/knowledge-docs/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase.from('knowledge_documents').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting knowledge doc:', error);
+        res.status(500).json({ error: 'Failed to delete knowledge document' });
+    }
+});
+
+// --- CONVERSATIONS & LOGS ---
+
+// GET /api/admin/chatbot/conversations
+router.get('/chatbot/conversations', async (req, res) => {
+    try {
+        const { status, agent_id, page = 1, limit = 20 } = req.query;
+
+        const result = await chatbotService.getConversationsForAdmin({
+            status: status as string,
+            agentId: agent_id as string,
+            page: Number(page),
+            limit: Number(limit)
+        });
+
+        res.json({
+            conversations: result.conversations,
+            total: result.total,
+            page: Number(page),
+            totalPages: Math.ceil(result.total / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching conversations:', error);
+        res.status(500).json({ error: 'Failed to fetch conversations' });
+    }
+});
+
+// GET /api/admin/chatbot/conversations/:id/messages
+router.get('/chatbot/conversations/:id/messages', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const { data, error } = await supabase
+            .from('chat_messages')
+            .select('*')
+            .eq('conversation_id', id)
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        console.error('Error fetching conversation messages:', error);
+        res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+});
+
+// --- GUEST INQUIRIES ---
+
+// GET /api/admin/chatbot/guest-inquiries
+router.get('/chatbot/guest-inquiries', async (req, res) => {
+    try {
+        const { status, page = 1, limit = 20 } = req.query;
+        const offset = (Number(page) - 1) * Number(limit);
+
+        let query = supabase
+            .from('guest_inquiries')
+            .select('*', { count: 'exact' })
+            .order('created_at', { ascending: false })
+            .range(offset, offset + Number(limit) - 1);
+
+        if (status) query = query.eq('status', status);
+
+        const { data, count, error } = await query;
+        if (error) throw error;
+
+        res.json({
+            inquiries: data || [],
+            total: count || 0,
+            page: Number(page),
+            totalPages: Math.ceil((count || 0) / Number(limit))
+        });
+    } catch (error) {
+        console.error('Error fetching guest inquiries:', error);
+        res.status(500).json({ error: 'Failed to fetch guest inquiries' });
+    }
+});
+
+// PUT /api/admin/chatbot/guest-inquiries/:id
+router.put('/chatbot/guest-inquiries/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = (req as any).user?.id;
+        const { status, admin_notes } = req.body;
+
+        const updateData: any = { status, admin_notes };
+        if (status === 'contacted' || status === 'resolved') {
+            updateData.responded_by = userId;
+            updateData.responded_at = new Date().toISOString();
+        }
+
+        const { data, error } = await supabase
+            .from('guest_inquiries')
+            .update(updateData)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error updating guest inquiry:', error);
+        res.status(500).json({ error: 'Failed to update guest inquiry' });
+    }
+});
+
+// --- CHATBOT TESTING ---
+
+// POST /api/admin/chatbot/test
+router.post('/chatbot/test', async (req, res) => {
+    try {
+        const { agent_id, message, language_id } = req.body;
+
+        if (!agent_id || !message) {
+            return res.status(400).json({ error: 'agent_id and message are required' });
+        }
+
+        const result = await chatbotService.testChatbot(agent_id, message, language_id);
+
+        res.json({
+            response: result.response,
+            tokens_used: result.tokensUsed
+        });
+    } catch (error: any) {
+        console.error('Error testing chatbot:', error);
+        res.status(500).json({ error: error.message || 'Failed to test chatbot' });
+    }
+});
+
+// GET /api/admin/chatbot/stats - Chatbot analytics
+router.get('/chatbot/stats', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Total conversations
+        const { count: totalConversations } = await supabase
+            .from('chat_conversations')
+            .select('*', { count: 'exact', head: true });
+
+        // Conversations in last 30 days
+        const { count: recentConversations } = await supabase
+            .from('chat_conversations')
+            .select('*', { count: 'exact', head: true })
+            .gt('started_at', thirtyDaysAgo);
+
+        // Escalated conversations
+        const { count: escalatedCount } = await supabase
+            .from('chat_conversations')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'escalated');
+
+        // Total messages
+        const { count: totalMessages } = await supabase
+            .from('chat_messages')
+            .select('*', { count: 'exact', head: true });
+
+        // Guest inquiries
+        const { count: pendingInquiries } = await supabase
+            .from('guest_inquiries')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+
+        // Active agents
+        const { count: activeAgents } = await supabase
+            .from('chatbot_agents')
+            .select('*', { count: 'exact', head: true })
+            .eq('is_active', true);
+
+        // Daily conversation trend
+        const { data: conversations } = await supabase
+            .from('chat_conversations')
+            .select('started_at')
+            .gt('started_at', thirtyDaysAgo);
+
+        const dailyCounts: Record<string, number> = {};
+        (conversations || []).forEach((c: any) => {
+            const date = new Date(c.started_at).toISOString().split('T')[0];
+            dailyCounts[date] = (dailyCounts[date] || 0) + 1;
+        });
+
+        const trendData = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            trendData.push({
+                date: dateStr,
+                conversations: dailyCounts[dateStr] || 0
+            });
+        }
+
+        res.json({
+            total_conversations: totalConversations || 0,
+            conversations_30d: recentConversations || 0,
+            escalated_conversations: escalatedCount || 0,
+            total_messages: totalMessages || 0,
+            pending_inquiries: pendingInquiries || 0,
+            active_agents: activeAgents || 0,
+            escalation_rate: totalConversations && totalConversations > 0
+                ? Math.round(((escalatedCount || 0) / totalConversations) * 100)
+                : 0,
+            daily_trend: trendData
+        });
+    } catch (error) {
+        console.error('Error fetching chatbot stats:', error);
+        res.status(500).json({ error: 'Failed to fetch chatbot stats' });
+    }
+});
+
 export default router;
 

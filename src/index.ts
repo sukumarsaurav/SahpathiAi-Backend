@@ -31,6 +31,7 @@ import paymentRoutes from './routes/payment';
 import supportRoutes from './routes/support';
 import trackingRoutes from './routes/tracking';
 import socialRoutes from './routes/social';
+import chatbotRoutes from './routes/chatbot';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -114,6 +115,7 @@ app.use('/api/payment', paymentRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/track', trackingRoutes);
 app.use('/api/social', socialRoutes);  // Not under /api/admin - OAuth callback needs to be public
+app.use('/api/chatbot', chatbotRoutes);
 
 // Error handling middleware
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
