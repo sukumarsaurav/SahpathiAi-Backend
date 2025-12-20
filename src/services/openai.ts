@@ -6,7 +6,7 @@ interface OpenAIMessage {
     content: string;
 }
 
-interface GeneratedQuestion {
+interface GeneratedMCQQuestion {
     question_text: string;
     options: string[];
     correct_answer_index: number;
@@ -14,6 +14,18 @@ interface GeneratedQuestion {
     difficulty: 'easy' | 'medium' | 'hard';
     concept_ids?: string[];
 }
+
+interface GeneratedFillBlankQuestion {
+    question_text: string; // Context/instruction
+    blank_text: string; // The sentence with _____ blank
+    correct_answers: string[]; // Array of acceptable answers
+    hint?: string;
+    explanation: string;
+    difficulty: 'easy' | 'medium' | 'hard';
+    concept_ids?: string[];
+}
+
+type GeneratedQuestion = GeneratedMCQQuestion | GeneratedFillBlankQuestion;
 
 interface GenerateQuestionsParams {
     topicName: string;
@@ -23,6 +35,7 @@ interface GenerateQuestionsParams {
     count: number;
     customInstructions?: string;
     existingQuestions?: string[]; // For duplicate prevention
+    questionType?: 'mcq' | 'fill_blank';
 }
 
 interface TranslateParams {
@@ -96,7 +109,7 @@ export async function generateQuestions(params: GenerateQuestionsParams): Promis
     questions: Record<string, GeneratedQuestion[]>; // Keyed by language code
     warnings: string[];
 }> {
-    const { topicName, concepts, languages, difficultyDistribution, count, customInstructions, existingQuestions } = params;
+    const { topicName, concepts, languages, difficultyDistribution, count, customInstructions, existingQuestions, questionType = 'mcq' } = params;
 
     const conceptList = concepts.map(c => `- ${c.name}${c.description ? `: ${c.description}` : ''}`).join('\n');
     const languageList = languages.map(l => l.name).join(', ');
@@ -111,7 +124,68 @@ export async function generateQuestions(params: GenerateQuestionsParams): Promis
         ? `\n\nIMPORTANT: Do NOT generate questions similar to these existing ones:\n${existingQuestions.slice(0, 20).map((q, i) => `${i + 1}. ${q}`).join('\n')}`
         : '';
 
-    const systemPrompt = `You are an expert educational content creator specializing in creating multiple-choice questions (MCQs) for competitive exams.
+    let systemPrompt: string;
+    let userPrompt: string;
+
+    if (questionType === 'fill_blank') {
+        // Fill in the Blank question generation
+        systemPrompt = `You are an expert educational content creator specializing in creating fill-in-the-blank questions for competitive exams.
+
+Your task is to generate high-quality fill-in-the-blank questions based on the given topic and concepts.
+
+RULES:
+1. Each question must have a sentence with a SINGLE blank marked as "_____" (5 underscores)
+2. Provide 1-3 acceptable correct answers for each blank
+3. The blank should test understanding of key terms, concepts, or facts
+4. Include an optional hint that guides without giving away the answer
+5. Explanations should be clear and teach the concept
+6. Follow the exact difficulty distribution requested
+7. Generate questions in ALL requested languages
+8. Ensure questions are unique and educational
+9. Make questions suitable for exam preparation
+
+DIFFICULTY GUIDELINES:
+- Easy: Basic recall, commonly known facts, simple terminology
+- Medium: Application of concepts, less common terms, requires understanding
+- Hard: Complex terminology, nuanced concepts, requires deep understanding`;
+
+        userPrompt = `Generate ${count} fill-in-the-blank questions for the topic: "${topicName}"
+
+CONCEPTS TO COVER:
+${conceptList}
+
+LANGUAGES: ${languageList}
+
+DIFFICULTY DISTRIBUTION:
+- Easy: ${easyCount} questions (${difficultyDistribution.easy}%)
+- Medium: ${mediumCount} questions (${difficultyDistribution.medium}%)
+- Hard: ${hardCount} questions (${difficultyDistribution.hard}%)
+
+${customInstructions ? `SPECIAL INSTRUCTIONS:\n${customInstructions}` : ''}
+${existingQuestionsContext}
+
+Respond with a JSON object in this exact format:
+{
+  "questions": {
+    "en": [
+      {
+        "question_text": "Context or instruction for the question (e.g., 'Complete the following sentence:')",
+        "blank_text": "The _____ is the largest organ in the human body.",
+        "correct_answers": ["skin", "Skin"],
+        "hint": "It covers and protects all other organs",
+        "explanation": "The skin is the largest organ, covering about 20 square feet.",
+        "difficulty": "easy",
+        "suggested_concept_names": ["Human Anatomy"]
+      }
+    ]
+  }
+}
+
+Use language codes: ${languages.map(l => l.code).join(', ')}`;
+
+    } else {
+        // MCQ question generation (default)
+        systemPrompt = `You are an expert educational content creator specializing in creating multiple-choice questions (MCQs) for competitive exams.
 
 Your task is to generate high-quality MCQs based on the given topic and concepts.
 
@@ -130,7 +204,7 @@ DIFFICULTY GUIDELINES:
 - Medium: Application of concepts, some calculation or reasoning
 - Hard: Complex scenarios, multi-step reasoning, advanced concepts`;
 
-    const userPrompt = `Generate ${count} multiple-choice questions for the topic: "${topicName}"
+        userPrompt = `Generate ${count} multiple-choice questions for the topic: "${topicName}"
 
 CONCEPTS TO COVER:
 ${conceptList}
@@ -172,6 +246,7 @@ Respond with a JSON object in this exact format:
 }
 
 Use language codes: ${languages.map(l => l.code).join(', ')}`;
+    }
 
     try {
         const response = await callOpenAI(

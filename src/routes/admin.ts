@@ -3851,7 +3851,8 @@ router.post('/questions/generate-ai', async (req, res) => {
             language_ids,
             difficulty_distribution,
             count,
-            custom_instructions
+            custom_instructions,
+            question_type
         } = req.body;
 
         // Validate inputs
@@ -3913,7 +3914,8 @@ router.post('/questions/generate-ai', async (req, res) => {
             difficultyDistribution: difficulty_distribution || { easy: 30, medium: 50, hard: 20 },
             count: count || 10,
             customInstructions: custom_instructions,
-            existingQuestions: existingTexts
+            existingQuestions: existingTexts,
+            questionType: question_type || 'mcq'
         });
 
         // Return generated questions for preview (not saved yet)
@@ -3922,7 +3924,8 @@ router.post('/questions/generate-ai', async (req, res) => {
             questions: result.questions, // Grouped by language code
             topic_id: topic_id,
             concept_ids: concept_ids,
-            requested: count || 10
+            requested: count || 10,
+            question_type: question_type || 'mcq'
         });
     } catch (error: any) {
         console.error('Error generating AI questions:', error);
