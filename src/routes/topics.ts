@@ -8,15 +8,24 @@ const router = Router();
  * GET /api/topics/subject/:subjectId
  * Get topics for a master subject, optionally filtered by exam (cached 12h)
  * Used by Marathon mode
+ * Optional query params:
+ * - examId: filter topics for specific exam
+ * - questionType: 'mcq' or 'fill_blank' to get question count for that type only
  */
 router.get('/subject/:subjectId', async (req, res) => {
     try {
         const { subjectId } = req.params;
-        const { examId } = req.query;
+        const { examId, questionType } = req.query;
         const examIdStr = examId as string | undefined;
+        const questionTypeStr = questionType as string | undefined;
+
+        // Include questionType in cache key for proper cache separation
+        const cacheKey = questionTypeStr
+            ? `${cache.KEYS.topics(subjectId, examIdStr)}_type_${questionTypeStr}`
+            : cache.KEYS.topics(subjectId, examIdStr);
 
         const data = await cache.getOrSet(
-            cache.KEYS.topics(subjectId, examIdStr),
+            cacheKey,
             cache.TTL.TOPICS,
             async () => {
                 // Build query to fetch topics for the master subject
@@ -41,11 +50,19 @@ router.get('/subject/:subjectId', async (req, res) => {
                 if (topics && topics.length > 0) {
                     const topicIds = topics.map(t => t.id);
 
-                    const { data: questionCounts, error: countError } = await supabaseAdmin
+                    // Build question count query with optional type filter
+                    let countQuery = supabaseAdmin
                         .from('questions')
-                        .select('topic_id')
+                        .select('topic_id, question_type')
                         .in('topic_id', topicIds)
                         .eq('is_active', true);
+
+                    // Add question type filter if specified
+                    if (questionTypeStr && ['mcq', 'fill_blank'].includes(questionTypeStr)) {
+                        countQuery = countQuery.eq('question_type', questionTypeStr);
+                    }
+
+                    const { data: questionCounts, error: countError } = await countQuery;
 
                     if (!countError && questionCounts) {
                         const countMap: Record<string, number> = {};
