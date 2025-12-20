@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase, supabaseAdmin } from '../db/supabase';
+import { emailService } from '../services/emailService';
 
 const router = Router();
 
@@ -141,9 +142,16 @@ router.post('/signup', async (req, res) => {
             }
         }
 
+        // Send verification email (non-blocking)
+        emailService.sendVerificationEmail(
+            authData.user.id,
+            email,
+            full_name || 'User'
+        ).catch(err => console.error('Failed to send verification email:', err));
+
         res.status(201).json({
-            message: 'User created successfully',
-            user: { id: authData.user.id, email },
+            message: 'User created successfully. Please check your email to verify your account.',
+            user: { id: authData.user.id, email, email_verified: false },
             session: authData.session
         });
     } catch (error) {
@@ -488,6 +496,197 @@ router.post('/track-session', async (req, res) => {
         console.error('Track session error:', error);
         // Return success anyway - don't break user experience for analytics
         res.json({ success: false, error: 'Failed to track session' });
+    }
+});
+
+// ===================================
+// EMAIL VERIFICATION & PASSWORD RESET
+// ===================================
+
+/**
+ * POST /api/auth/send-verification
+ * Send/resend verification email
+ */
+router.post('/send-verification', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader?.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+
+        const token = authHeader.substring(7);
+        const { data: { user }, error } = await supabase.auth.getUser(token);
+
+        if (error || !user) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+
+        // Get user profile
+        const { data: profile } = await supabaseAdmin
+            .from('users')
+            .select('full_name, email_verified')
+            .eq('id', user.id)
+            .single();
+
+        if (profile?.email_verified) {
+            return res.json({ success: true, message: 'Email already verified' });
+        }
+
+        // Send verification email
+        const result = await emailService.sendVerificationEmail(
+            user.id,
+            user.email!,
+            profile?.full_name || 'User'
+        );
+
+        if (result.success) {
+            res.json({ success: true, message: 'Verification email sent' });
+        } else {
+            res.status(500).json({ error: result.error || 'Failed to send verification email' });
+        }
+    } catch (error) {
+        console.error('Send verification error:', error);
+        res.status(500).json({ error: 'Failed to send verification email' });
+    }
+});
+
+/**
+ * POST /api/auth/verify-email
+ * Verify email with token
+ */
+router.post('/verify-email', async (req, res) => {
+    try {
+        const { token } = req.body;
+
+        if (!token) {
+            return res.status(400).json({ error: 'Token is required' });
+        }
+
+        // Verify token
+        const tokenResult = await emailService.verifyToken(token, 'verification');
+
+        if (!tokenResult.valid) {
+            return res.status(400).json({ error: tokenResult.error });
+        }
+
+        // Update user as verified
+        await supabaseAdmin
+            .from('users')
+            .update({
+                email_verified: true,
+                email_verified_at: new Date().toISOString()
+            })
+            .eq('id', tokenResult.userId);
+
+        // Mark token as used
+        await emailService.markTokenUsed(token);
+
+        // Send welcome email
+        const { data: profile } = await supabaseAdmin
+            .from('users')
+            .select('full_name')
+            .eq('id', tokenResult.userId)
+            .single();
+
+        await emailService.sendWelcomeEmail(
+            tokenResult.email!,
+            profile?.full_name || 'User'
+        );
+
+        res.json({ success: true, message: 'Email verified successfully' });
+    } catch (error) {
+        console.error('Verify email error:', error);
+        res.status(500).json({ error: 'Failed to verify email' });
+    }
+});
+
+/**
+ * POST /api/auth/forgot-password
+ * Send password reset email (custom)
+ */
+router.post('/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({ error: 'Email is required' });
+        }
+
+        // Send reset email (service handles user lookup)
+        await emailService.sendPasswordResetEmail(email);
+
+        // Always return success to prevent email enumeration
+        res.json({ success: true, message: 'If an account exists, a reset email has been sent' });
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        // Still return success to prevent enumeration
+        res.json({ success: true, message: 'If an account exists, a reset email has been sent' });
+    }
+});
+
+/**
+ * POST /api/auth/reset-password
+ * Reset password with token
+ */
+router.post('/reset-password', async (req, res) => {
+    try {
+        const { token, password } = req.body;
+
+        if (!token || !password) {
+            return res.status(400).json({ error: 'Token and password are required' });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+
+        // Verify token
+        const tokenResult = await emailService.verifyToken(token, 'password_reset');
+
+        if (!tokenResult.valid) {
+            return res.status(400).json({ error: tokenResult.error });
+        }
+
+        // Update password using Supabase Admin
+        const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+            tokenResult.userId!,
+            { password }
+        );
+
+        if (updateError) {
+            console.error('Password update error:', updateError);
+            return res.status(500).json({ error: 'Failed to update password' });
+        }
+
+        // Mark token as used
+        await emailService.markTokenUsed(token);
+
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({ error: 'Failed to reset password' });
+    }
+});
+
+/**
+ * GET /api/auth/verify-token
+ * Check if a token is valid (for frontend validation)
+ */
+router.get('/verify-token', async (req, res) => {
+    try {
+        const { token, type } = req.query;
+
+        if (!token || !type) {
+            return res.status(400).json({ valid: false, error: 'Token and type are required' });
+        }
+
+        const tokenType = type as 'verification' | 'password_reset';
+        const result = await emailService.verifyToken(token as string, tokenType);
+
+        res.json(result);
+    } catch (error) {
+        console.error('Verify token error:', error);
+        res.status(500).json({ valid: false, error: 'Failed to verify token' });
     }
 });
 
