@@ -199,7 +199,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
                         };
                     });
                 } else {
-                    // Fallback: fetch random questions from the database
+                    // Fallback: fetch random MCQ questions from the database
                     console.log(`[Tests] No test_questions found for test ${id}, fetching from questions pool`);
 
                     const { data: fallbackQuestions } = await supabaseAdmin
@@ -209,6 +209,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
                             translations:question_translations(*, language:languages(*))
                         `)
                         .eq('is_active', true)
+                        .or('question_type.is.null,question_type.eq.mcq')
                         .limit(test.total_questions || 20);
 
                     if (fallbackQuestions && fallbackQuestions.length > 0) {

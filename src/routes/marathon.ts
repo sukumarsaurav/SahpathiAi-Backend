@@ -10,18 +10,28 @@ const router = Router();
  */
 router.post('/start', authenticate, async (req, res) => {
     try {
-        const { subject_id, exam_id, topic_ids } = req.body;
+        const { subject_id, exam_id, topic_ids, question_type = 'mcq' } = req.body;
 
         if (!topic_ids || topic_ids.length === 0) {
             return res.status(400).json({ error: 'No topics selected' });
         }
 
-        // Get questions for selected topics
+        // Build question type filter
+        let questionTypeFilter: string;
+        if (question_type === 'fill_blank') {
+            questionTypeFilter = 'question_type.eq.fill_blank';
+        } else {
+            // MCQ mode: include null (legacy) and explicit mcq
+            questionTypeFilter = 'question_type.is.null,question_type.eq.mcq';
+        }
+
+        // Get questions for selected topics filtered by question type
         const { data: questions, error: questionsError } = await supabaseAdmin
             .from('questions')
             .select('id')
             .in('topic_id', topic_ids)
-            .eq('is_active', true);
+            .eq('is_active', true)
+            .or(questionTypeFilter);
 
         if (questionsError) {
             console.error('Error fetching questions:', questionsError);
@@ -29,7 +39,7 @@ router.post('/start', authenticate, async (req, res) => {
         }
 
         if (!questions || questions.length === 0) {
-            return res.status(400).json({ error: 'No questions found for selected topics' });
+            return res.status(400).json({ error: `No ${question_type === 'fill_blank' ? 'fill-in-the-blank' : 'MCQ'} questions found for selected topics` });
         }
 
         // Look up exam_subject_id from subject_id and exam_id (optional)
@@ -61,7 +71,8 @@ router.post('/start', authenticate, async (req, res) => {
                 correct_answers: 0,
                 questions_mastered: 0,
                 started_at: new Date().toISOString(),
-                last_question_id: null // Will be set after first question is shown
+                last_question_id: null, // Will be set after first question is shown
+                question_type: question_type // Store question type for the session
             })
             .select()
             .single();
@@ -130,14 +141,15 @@ router.get('/next-question', authenticate, async (req, res) => {
     try {
         const { session_id } = req.query;
 
-        // Get session to check last_question_id for preventing consecutive repeats
+        // Get session to check last_question_id and question_type
         const { data: session } = await supabaseAdmin
             .from('marathon_sessions')
-            .select('last_question_id')
+            .select('last_question_id, question_type')
             .eq('id', session_id)
             .single();
 
         const lastQuestionId = session?.last_question_id;
+        const sessionQuestionType = session?.question_type || 'mcq';
         const now = new Date().toISOString();
 
         // Build query for eligible questions:
@@ -210,7 +222,9 @@ router.get('/next-question', authenticate, async (req, res) => {
                         options: translation?.options,
                         difficulty: q.difficulty,
                         times_shown: lastQuestion.times_shown + 1,
-                        translations: q.translations
+                        translations: q.translations,
+                        question_type: q.question_type || 'mcq',
+                        blank_data: q.blank_data || null
                     });
                 }
             }
@@ -251,7 +265,9 @@ router.get('/next-question', authenticate, async (req, res) => {
             options: translation?.options,
             difficulty: q.difficulty,
             times_shown: queueItem.times_shown + 1,
-            translations: q.translations
+            translations: q.translations,
+            question_type: q.question_type || 'mcq',
+            blank_data: q.blank_data || null
         });
     } catch (error) {
         console.error('Get next question error:', error);
@@ -265,19 +281,39 @@ router.get('/next-question', authenticate, async (req, res) => {
  */
 router.post('/answer', authenticate, async (req, res) => {
     try {
-        const { session_id, queue_id, question_id, selected_option, time_taken_seconds } = req.body;
+        const { session_id, queue_id, question_id, selected_option, text_answer, time_taken_seconds } = req.body;
 
-        // Get correct answer and translations for explanation
+        // Get question with correct answer and blank_data for fill_blank
         const { data: question } = await supabaseAdmin
             .from('questions')
             .select(`
                 correct_answer_index,
+                question_type,
+                blank_data,
                 translations:question_translations(*)
             `)
             .eq('id', question_id)
             .single();
 
-        const isCorrect = question?.correct_answer_index === selected_option;
+        // Determine correctness based on question type
+        let isCorrect = false;
+        const questionType = question?.question_type || 'mcq';
+
+        if (questionType === 'fill_blank') {
+            // Fill in blank: compare text_answer against correct_answers array
+            const blankData = question?.blank_data as any;
+            const correctAnswers = blankData?.correct_answers || [];
+
+            if (text_answer && correctAnswers.length > 0) {
+                const userAnswer = text_answer.trim().toLowerCase();
+                isCorrect = correctAnswers.some((ans: string) =>
+                    ans.trim().toLowerCase() === userAnswer
+                );
+            }
+        } else {
+            // MCQ: compare selected_option against correct_answer_index
+            isCorrect = question?.correct_answer_index === selected_option;
+        }
 
         // Get explanation from translations
         let explanation: string | null = null;
@@ -349,7 +385,8 @@ router.post('/answer', authenticate, async (req, res) => {
         await supabaseAdmin.from('marathon_answers').insert({
             session_id,
             question_id,
-            selected_option,
+            selected_option: questionType === 'mcq' ? selected_option : null,
+            text_answer: questionType === 'fill_blank' ? text_answer : null,
             is_correct: isCorrect,
             time_taken_seconds,
             attempt_number: attemptNumber
@@ -371,9 +408,12 @@ router.post('/answer', authenticate, async (req, res) => {
             })
             .eq('id', session_id);
 
+        // Build response based on question type
+        const blankData = question?.blank_data as any;
         res.json({
             is_correct: isCorrect,
-            correct_answer: question?.correct_answer_index,
+            correct_answer: questionType === 'mcq' ? question?.correct_answer_index : null,
+            correct_answers: questionType === 'fill_blank' ? (blankData?.correct_answers || []) : null,
             explanation: explanation,
             is_mastered: isMastered,
             will_repeat: !isCorrect // Indicate to frontend that wrong questions will return

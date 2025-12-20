@@ -1257,10 +1257,24 @@ router.post('/questions/bulk', async (req, res) => {
                     results.errors.push(`Question ${i + 1}: topic_id is required`);
                     continue;
                 }
-                if (q.correct_answer_index === undefined || q.correct_answer_index < 0 || q.correct_answer_index > 3) {
-                    results.failed++;
-                    results.errors.push(`Question ${i + 1}: correct_answer_index must be 0-3`);
-                    continue;
+
+                // Determine question type (default to mcq)
+                const questionType = q.question_type || 'mcq';
+
+                // Validate based on question type
+                if (questionType === 'mcq') {
+                    if (q.correct_answer_index === undefined || q.correct_answer_index < 0 || q.correct_answer_index > 3) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: correct_answer_index must be 0-3 for MCQ`);
+                        continue;
+                    }
+                } else if (questionType === 'fill_blank') {
+                    // Fill in blank validation: needs blank_text and correct_answers
+                    if (!q.blank_text && !q.correct_answers) {
+                        results.failed++;
+                        results.errors.push(`Question ${i + 1}: blank_text or correct_answers required for fill_blank`);
+                        continue;
+                    }
                 }
 
                 // Check if this is multi-language format (has translations object)
@@ -1275,30 +1289,49 @@ router.post('/questions/bulk', async (req, res) => {
                         continue;
                     }
 
-                    // Validate all translations have required fields
+                    // Validate all translations have required fields based on question type
                     let hasValidTranslation = true;
                     for (const code of translationCodes) {
                         const t = q.translations[code];
-                        if (!t.question_text || !t.options || t.options.length !== 4) {
-                            results.failed++;
-                            results.errors.push(`Question ${i + 1}: translation '${code}' requires question_text and 4 options`);
-                            hasValidTranslation = false;
-                            break;
+                        if (questionType === 'mcq') {
+                            if (!t.question_text || !t.options || t.options.length !== 4) {
+                                results.failed++;
+                                results.errors.push(`Question ${i + 1}: translation '${code}' requires question_text and 4 options for MCQ`);
+                                hasValidTranslation = false;
+                                break;
+                            }
+                        } else if (questionType === 'fill_blank') {
+                            // Fill in blank can have question_text (context) and stores blank data separately
+                            // Translation just needs question_text (can be context/instruction)
                         }
                     }
                     if (!hasValidTranslation) continue;
 
-                    // 1. Create Question
+                    // 1. Create Question with question_type and blank_data if applicable
+                    const questionInsertData: any = {
+                        topic_id: q.topic_id,
+                        difficulty: q.difficulty || 'medium',
+                        correct_answer_index: questionType === 'mcq' ? q.correct_answer_index : 0,
+                        is_active: q.is_active !== false,
+                        is_ai_generated: q.is_ai_generated || false,
+                        is_verified: q.is_ai_generated ? false : true,
+                        question_type: questionType
+                    };
+
+                    // Add blank_data for fill_blank questions
+                    if (questionType === 'fill_blank') {
+                        questionInsertData.blank_data = {
+                            blank_text: q.blank_text || '',
+                            correct_answers: q.correct_answers || [],
+                            hint: q.hint || null,
+                            case_sensitive: false,
+                            partial_scoring: false
+                        };
+                    }
+
                     const { data: question, error: qError } = await supabase
                         .from('questions')
-                        .insert({
-                            topic_id: q.topic_id,
-                            difficulty: q.difficulty || 'medium',
-                            correct_answer_index: q.correct_answer_index,
-                            is_active: q.is_active !== false,
-                            is_ai_generated: q.is_ai_generated || false,
-                            is_verified: q.is_ai_generated ? false : true
-                        })
+                        .insert(questionInsertData)
                         .select()
                         .single();
 
@@ -1324,9 +1357,9 @@ router.post('/questions/bulk', async (req, res) => {
                             .insert({
                                 question_id: question.id,
                                 language_id: languageId,
-                                question_text: t.question_text,
-                                options: t.options,
-                                explanation: t.explanation || null
+                                question_text: t.question_text || q.question_text || '',
+                                options: questionType === 'mcq' ? t.options : [],
+                                explanation: t.explanation || q.explanation || null
                             });
 
                         if (tError) {
@@ -1395,23 +1428,47 @@ router.post('/questions/bulk', async (req, res) => {
 
                 } else {
                     // Single language format
-                    if (!q.question_text || !q.options || q.options.length !== 4) {
-                        results.failed++;
-                        results.errors.push(`Question ${i + 1}: question_text and 4 options are required`);
-                        continue;
+                    // Validate based on question type
+                    if (questionType === 'mcq') {
+                        if (!q.question_text || !q.options || q.options.length !== 4) {
+                            results.failed++;
+                            results.errors.push(`Question ${i + 1}: question_text and 4 options are required for MCQ`);
+                            continue;
+                        }
+                    } else if (questionType === 'fill_blank') {
+                        // Fill in blank: question_text is optional (context), but blank_text/correct_answers required
+                        if (!q.blank_text && !q.correct_answers) {
+                            results.failed++;
+                            results.errors.push(`Question ${i + 1}: blank_text or correct_answers required for fill_blank`);
+                            continue;
+                        }
                     }
 
-                    // 1. Create Question
+                    // 1. Create Question with question_type and blank_data if applicable
+                    const singleQuestionInsertData: any = {
+                        topic_id: q.topic_id,
+                        difficulty: q.difficulty || 'medium',
+                        correct_answer_index: questionType === 'mcq' ? q.correct_answer_index : 0,
+                        is_active: q.is_active !== false,
+                        is_ai_generated: q.is_ai_generated || false,
+                        is_verified: q.is_ai_generated ? false : true,
+                        question_type: questionType
+                    };
+
+                    // Add blank_data for fill_blank questions
+                    if (questionType === 'fill_blank') {
+                        singleQuestionInsertData.blank_data = {
+                            blank_text: q.blank_text || '',
+                            correct_answers: q.correct_answers || [],
+                            hint: q.hint || null,
+                            case_sensitive: false,
+                            partial_scoring: false
+                        };
+                    }
+
                     const { data: question, error: qError } = await supabase
                         .from('questions')
-                        .insert({
-                            topic_id: q.topic_id,
-                            difficulty: q.difficulty || 'medium',
-                            correct_answer_index: q.correct_answer_index,
-                            is_active: q.is_active !== false,
-                            is_ai_generated: q.is_ai_generated || false,
-                            is_verified: q.is_ai_generated ? false : true
-                        })
+                        .insert(singleQuestionInsertData)
                         .select()
                         .single();
 
@@ -1429,8 +1486,8 @@ router.post('/questions/bulk', async (req, res) => {
                             .insert({
                                 question_id: question.id,
                                 language_id: languageId,
-                                question_text: q.question_text,
-                                options: q.options,
+                                question_text: q.question_text || '',
+                                options: questionType === 'mcq' ? q.options : [],
                                 explanation: q.explanation || null
                             });
 

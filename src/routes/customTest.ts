@@ -13,12 +13,13 @@ router.post('/generate', authenticate, async (req, res) => {
     try {
         const { subjectId, topicIds, totalQuestions, durationMinutes } = req.body;
 
-        // Get random questions from selected topics
+        // Get random MCQ questions from selected topics (exclude fill_blank, map questions, etc.)
         const { data: questions, error } = await supabaseAdmin
             .from('questions')
             .select('id')
             .in('topic_id', topicIds)
             .eq('is_active', true)
+            .or('question_type.is.null,question_type.eq.mcq')
             .limit(totalQuestions);
 
         if (error) throw error;

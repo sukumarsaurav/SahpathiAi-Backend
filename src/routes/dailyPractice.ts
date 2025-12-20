@@ -139,18 +139,20 @@ router.get('/stats', authenticate, async (req, res) => {
         const attemptedTopicIds = new Set(attemptedTopics?.map(a => (a.question as any)?.topic_id));
         const newTopicIds = allTopics?.filter(t => !attemptedTopicIds.has(t.id)).map(t => t.id) || [];
 
-        // Count questions in new topics
+        // Count MCQ questions in new topics
         const { count: newTopicsCount } = await supabaseAdmin
             .from('questions')
             .select('*', { count: 'exact', head: true })
-            .in('topic_id', newTopicIds.length > 0 ? newTopicIds : ['none']);
+            .in('topic_id', newTopicIds.length > 0 ? newTopicIds : ['none'])
+            .or('question_type.is.null,question_type.eq.mcq');
 
         // Get strong areas (>80% accuracy)
         // This is simplified - in production, calculate per-topic accuracy
         const { count: strongAreasCount } = await supabaseAdmin
             .from('questions')
             .select('*', { count: 'exact', head: true })
-            .eq('is_active', true);
+            .eq('is_active', true)
+            .or('question_type.is.null,question_type.eq.mcq');
 
         // Count mistakes
         const { count: mistakesCount } = await supabaseAdmin
@@ -364,6 +366,7 @@ router.post('/generate', authenticate, async (req, res) => {
                 .from('questions')
                 .select('id')
                 .eq('is_active', true)
+                .or('question_type.is.null,question_type.eq.mcq')
                 .limit(neededCount * 2);
 
             if (excludeIds.length > 0) {
