@@ -869,6 +869,9 @@ router.get('/questions', async (req, res) => {
                 is_active,
                 is_ai_generated,
                 is_verified,
+                question_type,
+                map_data,
+                blank_data,
                 created_at
             `, { count: 'exact' });
 
@@ -1000,6 +1003,9 @@ router.get('/questions', async (req, res) => {
                 correct_answer_index: q.correct_answer_index,
                 is_active: q.is_active,
                 created_at: q.created_at,
+                question_type: q.question_type || 'mcq',
+                map_data: q.map_data || null,
+                blank_data: q.blank_data || null,
                 question_text: translation?.question_text || '(No translation)',
                 topic_name: topicInfo.name || '(No topic)',
                 subject_name: topicInfo.subject_name || '(No subject)'
