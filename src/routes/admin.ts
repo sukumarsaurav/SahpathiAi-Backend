@@ -1085,16 +1085,43 @@ router.get('/questions/:id', async (req, res) => {
 // POST /api/admin/questions - Create new question
 router.post('/questions', async (req, res) => {
     try {
-        const { topic_id, difficulty, correct_answer_index, translations, exam_history } = req.body;
+        const {
+            topic_id,
+            difficulty,
+            correct_answer_index,
+            question_type,  // NEW: map_state, map_multi, map_fill_blank, etc.
+            map_data,       // NEW: { mapType, correctAnswers, stateName, etc. }
+            blank_data,     // NEW: { blanks, question_template, etc. }
+            translations,
+            exam_history
+        } = req.body;
 
-        // 1. Create Question Core
+        // Determine correct_answer_index (0 for non-MCQ questions)
+        const answerIndex = question_type && question_type !== 'mcq'
+            ? 0
+            : (correct_answer_index ?? 0);
+
+        // 1. Create Question Core with map-specific fields
+        const questionInsertData: any = {
+            topic_id,
+            difficulty: difficulty || 'medium',
+            correct_answer_index: answerIndex,
+        };
+
+        // Add optional map question fields
+        if (question_type) {
+            questionInsertData.question_type = question_type;
+        }
+        if (map_data) {
+            questionInsertData.map_data = map_data;
+        }
+        if (blank_data) {
+            questionInsertData.blank_data = blank_data;
+        }
+
         const { data: question, error: qError } = await supabase
             .from('questions')
-            .insert({
-                topic_id,
-                difficulty,
-                correct_answer_index
-            })
+            .insert(questionInsertData)
             .select()
             .single();
 
@@ -1102,19 +1129,42 @@ router.post('/questions', async (req, res) => {
 
         // 2. Create Translations
         if (translations && translations.length > 0) {
-            const translationInserts = translations.map((t: any) => ({
-                question_id: question.id,
-                language_id: t.language_id,
-                question_text: t.question_text,
-                options: t.options,
-                explanation: t.explanation
-            }));
+            const translationInserts = [];
 
-            const { error: tError } = await supabase
-                .from('question_translations')
-                .insert(translationInserts);
+            for (const t of translations) {
+                let languageId = t.language_id;
 
-            if (tError) throw tError;
+                // If language_code provided but no language_id, look it up
+                if (!languageId && t.language_code) {
+                    const { data: langData } = await supabase
+                        .from('languages')
+                        .select('id')
+                        .eq('code', t.language_code)
+                        .single();
+
+                    if (langData) {
+                        languageId = langData.id;
+                    }
+                }
+
+                if (languageId) {
+                    translationInserts.push({
+                        question_id: question.id,
+                        language_id: languageId,
+                        question_text: t.question_text,
+                        options: t.options || [],
+                        explanation: t.explanation
+                    });
+                }
+            }
+
+            if (translationInserts.length > 0) {
+                const { error: tError } = await supabase
+                    .from('question_translations')
+                    .insert(translationInserts);
+
+                if (tError) throw tError;
+            }
         }
 
         // 3. Create Exam History
@@ -1148,33 +1198,76 @@ router.post('/questions', async (req, res) => {
 router.put('/questions/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { topic_id, difficulty, correct_answer_index, translations, exam_history } = req.body;
+        const {
+            topic_id,
+            difficulty,
+            correct_answer_index,
+            question_type,  // NEW: map_state, map_multi, map_fill_blank, etc.
+            map_data,       // NEW: { mapType, correctAnswers, stateName, etc. }
+            blank_data,     // NEW: { blanks, question_template, etc. }
+            translations,
+            exam_history
+        } = req.body;
+
+        // Build update data dynamically
+        const updateData: any = {};
+        if (topic_id !== undefined) updateData.topic_id = topic_id;
+        if (difficulty !== undefined) updateData.difficulty = difficulty;
+        if (correct_answer_index !== undefined) updateData.correct_answer_index = correct_answer_index;
+        if (question_type !== undefined) updateData.question_type = question_type;
+        if (map_data !== undefined) updateData.map_data = map_data;
+        if (blank_data !== undefined) updateData.blank_data = blank_data;
 
         // 1. Update Core
-        const { error: qError } = await supabase
-            .from('questions')
-            .update({ topic_id, difficulty, correct_answer_index })
-            .eq('id', id);
+        if (Object.keys(updateData).length > 0) {
+            const { error: qError } = await supabase
+                .from('questions')
+                .update(updateData)
+                .eq('id', id);
 
-        if (qError) throw qError;
+            if (qError) throw qError;
+        }
 
         // 2. Update Translations (Upsert)
         if (translations && translations.length > 0) {
-            const translationUpserts = translations.map((t: any) => ({
-                question_id: id,
-                language_id: t.language_id,
-                question_text: t.question_text,
-                options: t.options,
-                explanation: t.explanation,
-                // If it has an ID, keep it, else it's new
-                ...(t.id ? { id: t.id } : {})
-            }));
+            const translationUpserts = [];
 
-            const { error: tError } = await supabase
-                .from('question_translations')
-                .upsert(translationUpserts);
+            for (const t of translations) {
+                let languageId = t.language_id;
 
-            if (tError) throw tError;
+                // If language_code provided but no language_id, look it up
+                if (!languageId && t.language_code) {
+                    const { data: langData } = await supabase
+                        .from('languages')
+                        .select('id')
+                        .eq('code', t.language_code)
+                        .single();
+
+                    if (langData) {
+                        languageId = langData.id;
+                    }
+                }
+
+                if (languageId) {
+                    translationUpserts.push({
+                        question_id: id,
+                        language_id: languageId,
+                        question_text: t.question_text,
+                        options: t.options || [],
+                        explanation: t.explanation,
+                        // If it has an ID, keep it, else it's new
+                        ...(t.id ? { id: t.id } : {})
+                    });
+                }
+            }
+
+            if (translationUpserts.length > 0) {
+                const { error: tError } = await supabase
+                    .from('question_translations')
+                    .upsert(translationUpserts);
+
+                if (tError) throw tError;
+            }
         }
 
         // 3. Update Exam History (Delete all and re-insert)
