@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase, supabaseAdmin, getAuthenticatedClient } from '../db/supabase';
+import { supabaseAdmin } from '../db/supabase';
+import { verifyToken } from '../utils/jwt';
 
 // Extend Express Request to include user
 declare global {
@@ -17,7 +18,7 @@ declare global {
 
 /**
  * Authentication middleware
- * Validates the JWT token from the Authorization header
+ * Validates custom JWT tokens from the Authorization header
  */
 export async function authenticate(req: Request, res: Response, next: NextFunction) {
     try {
@@ -29,55 +30,31 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
 
         const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
-        // Verify the token with Supabase
-        const { data: { user }, error } = await supabase.auth.getUser(token);
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
 
-        if (error || !user) {
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid or expired token' });
         }
 
-        // Create authenticated client for RLS operations
-        const authSupabase = getAuthenticatedClient(token);
-
-        // Fetch additional user data (without deprecated preferred_language_id from users)
-        const { data: userData, error: fetchError } = await authSupabase
+        // Fetch user data from database
+        const { data: userData, error: fetchError } = await supabaseAdmin
             .from('users')
             .select('id, email, target_exam_id')
-            .eq('id', user.id)
+            .eq('id', jwtPayload.userId)
             .single();
 
-        // If user missing in public table, create them
-        if (fetchError && fetchError.code === 'PGRST116') {
-            const { data: newUser, error: createError } = await authSupabase
-                .from('users')
-                .insert({
-                    id: user.id,
-                    email: user.email,
-                    username: user.email?.split('@')[0] + '_' + Math.floor(Math.random() * 1000),
-                    full_name: user.user_metadata?.full_name || '',
-                    avatar_url: user.user_metadata?.avatar_url || ''
-                })
-                .select()
-                .single();
-
-            if (createError) {
-                console.error('Failed to auto-create user:', createError);
-                return res.status(500).json({ error: 'Failed to create user profile' });
-            }
-            req.user = newUser;
-        } else if (fetchError) {
-            console.error('Error fetching user profile:', fetchError);
-            // Fallback to basic info
-            req.user = { id: user.id, email: user.email || '' };
-        } else {
-            req.user = userData;
+        if (fetchError || !userData) {
+            return res.status(401).json({ error: 'User not found' });
         }
+
+        req.user = userData;
 
         // Fetch preferred_language_id from user_preferences table
         const { data: prefsData } = await supabaseAdmin
             .from('user_preferences')
             .select('preferred_language_id')
-            .eq('user_id', user.id)
+            .eq('user_id', jwtPayload.userId)
             .single();
 
         if (prefsData?.preferred_language_id) {
@@ -90,6 +67,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
         return res.status(500).json({ error: 'Authentication failed' });
     }
 }
+
 
 
 /**
@@ -105,26 +83,28 @@ export async function optionalAuth(req: Request, res: Response, next: NextFuncti
         }
 
         const token = authHeader.substring(7);
-        const { data: { user }, error } = await supabase.auth.getUser(token);
+        const jwtPayload = verifyToken(token);
 
-        if (!error && user) {
-            const { data: userData } = await supabase
+        if (jwtPayload && jwtPayload.type === 'access') {
+            const { data: userData } = await supabaseAdmin
                 .from('users')
                 .select('id, email, target_exam_id')
-                .eq('id', user.id)
+                .eq('id', jwtPayload.userId)
                 .single();
 
-            req.user = userData || { id: user.id, email: user.email || '' };
+            if (userData) {
+                req.user = userData;
 
-            // Fetch preferred_language_id from user_preferences table
-            const { data: prefsData } = await supabaseAdmin
-                .from('user_preferences')
-                .select('preferred_language_id')
-                .eq('user_id', user.id)
-                .single();
+                // Fetch preferred_language_id from user_preferences table
+                const { data: prefsData } = await supabaseAdmin
+                    .from('user_preferences')
+                    .select('preferred_language_id')
+                    .eq('user_id', jwtPayload.userId)
+                    .single();
 
-            if (prefsData?.preferred_language_id && req.user) {
-                req.user.preferred_language_id = prefsData.preferred_language_id;
+                if (prefsData?.preferred_language_id) {
+                    req.user.preferred_language_id = prefsData.preferred_language_id;
+                }
             }
         }
 
@@ -134,4 +114,5 @@ export async function optionalAuth(req: Request, res: Response, next: NextFuncti
         next();
     }
 }
+
 

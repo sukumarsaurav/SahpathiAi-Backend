@@ -1,8 +1,12 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { supabase, supabaseAdmin } from '../db/supabase';
 import { emailService } from '../services/emailService';
+import { generateTokenPair, verifyToken } from '../utils/jwt';
+import { hashPassword, comparePassword, validatePassword } from '../utils/password';
 
 const router = Router();
+
 
 /**
  * POST /api/auth/signup
@@ -307,20 +311,342 @@ router.post('/login', async (req, res) => {
     }
 });
 
-/**
- * POST /api/auth/logout
- * Logout user
- */
-router.post('/logout', async (req, res) => {
-    try {
-        const { error } = await supabase.auth.signOut();
+// ===================================
+// V2 AUTH ENDPOINTS (Custom JWT - No Supabase Auth)
+// ===================================
 
-        if (error) {
-            return res.status(400).json({ error: error.message });
+/**
+ * POST /api/auth/v2/signup
+ * Register a new user with custom auth (bcrypt + JWT)
+ * This is the new signup endpoint that doesn't use Supabase Auth
+ */
+router.post('/v2/signup', async (req, res) => {
+    try {
+        const {
+            email,
+            password,
+            full_name,
+            preferred_language_id,
+            target_exam_id,
+            referral_code,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            referrer_url,
+            landing_page,
+            visitor_id
+        } = req.body;
+
+        // Validate input
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required' });
+        }
+
+        const passwordError = validatePassword(password);
+        if (passwordError) {
+            return res.status(400).json({ error: passwordError });
+        }
+
+        // Check if email already exists
+        const { data: existingUser } = await supabaseAdmin
+            .from('users')
+            .select('id')
+            .eq('email', email.toLowerCase())
+            .single();
+
+        if (existingUser) {
+            return res.status(400).json({ error: 'An account with this email already exists' });
+        }
+
+        // Generate user ID and hash password
+        const userId = crypto.randomUUID();
+        const passwordHash = await hashPassword(password);
+
+        // Create user profile with password hash
+        const { error: profileError } = await supabaseAdmin
+            .from('users')
+            .insert({
+                id: userId,
+                email: email.toLowerCase(),
+                full_name,
+                password_hash: passwordHash,
+                auth_provider: 'email',
+                preferred_language_id,
+                target_exam_id,
+                email_verified: false
+            });
+
+        if (profileError) {
+            console.error('Profile creation error:', profileError);
+            return res.status(500).json({ error: 'Failed to create user' });
+        }
+
+        // Create default user stats
+        await supabaseAdmin.from('user_stats').insert({ user_id: userId });
+
+        // Create default preferences
+        await supabaseAdmin.from('user_preferences').insert({ user_id: userId });
+
+        // Create wallet
+        await supabaseAdmin.from('wallets').insert({ user_id: userId, balance: 0 });
+
+        // Generate referral code
+        const code = `${full_name?.substring(0, 4).toUpperCase() || 'USER'}${Date.now().toString().slice(-4)}`;
+        await supabaseAdmin.from('referral_codes').insert({
+            user_id: userId,
+            code,
+            referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
+        });
+
+        // Apply referral code if provided
+        if (referral_code) {
+            const { data: referrer } = await supabaseAdmin
+                .from('referral_codes')
+                .select('user_id')
+                .eq('code', referral_code)
+                .single();
+
+            if (referrer) {
+                await supabaseAdmin.from('referrals').insert({
+                    referrer_id: referrer.user_id,
+                    referred_id: userId,
+                    status: 'pending',
+                    reward_amount: 15.00
+                });
+            }
+        }
+
+        // Track marketing referral source if UTM params provided
+        if (utm_source || utm_medium || utm_campaign) {
+            try {
+                let campaignId = null;
+                if (utm_campaign) {
+                    const { data: campaign } = await supabaseAdmin
+                        .from('marketing_campaigns')
+                        .select('id')
+                        .eq('utm_campaign', utm_campaign)
+                        .single();
+                    campaignId = campaign?.id;
+                }
+
+                await supabaseAdmin.from('user_referral_sources').insert({
+                    user_id: userId,
+                    utm_source,
+                    utm_medium,
+                    utm_campaign,
+                    utm_content,
+                    utm_term,
+                    referrer_url,
+                    landing_page,
+                    campaign_id: campaignId
+                });
+            } catch (utmError) {
+                console.error('Failed to track referral source:', utmError);
+            }
+        }
+
+        // Link anonymous visitor
+        if (visitor_id) {
+            try {
+                await supabaseAdmin
+                    .from('website_visitors')
+                    .update({
+                        user_id: userId,
+                        converted_to_signup: true,
+                        signup_date: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('visitor_id', visitor_id);
+            } catch (visitorError) {
+                console.error('Failed to link visitor:', visitorError);
+            }
+        }
+
+        // Generate JWT tokens
+        const tokens = generateTokenPair(userId, email.toLowerCase());
+
+        // Store refresh token
+        const refreshExpiresAt = new Date();
+        refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+        await supabaseAdmin.from('refresh_tokens').insert({
+            user_id: userId,
+            token: tokens.refreshToken,
+            expires_at: refreshExpiresAt.toISOString()
+        });
+
+        // Send verification email (non-blocking)
+        emailService.sendVerificationEmail(
+            userId,
+            email,
+            full_name || 'User'
+        ).catch(err => console.error('Failed to send verification email:', err));
+
+        res.status(201).json({
+            message: 'User created successfully. Please check your email to verify your account.',
+            user: { id: userId, email: email.toLowerCase(), email_verified: false },
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken
+        });
+    } catch (error) {
+        console.error('V2 Signup error:', error);
+        res.status(500).json({ error: 'Failed to create user' });
+    }
+});
+
+/**
+ * POST /api/auth/v2/login
+ * Login user with custom auth (bcrypt + JWT)
+ */
+router.post('/v2/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required' });
+        }
+
+        // Fetch user with password hash
+        const { data: user, error: fetchError } = await supabaseAdmin
+            .from('users')
+            .select('*, target_exam:exams(*)')
+            .eq('email', email.toLowerCase())
+            .single();
+
+        if (fetchError || !user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Check if user has a password (might be OAuth user)
+        if (!user.password_hash) {
+            // Check auth provider
+            if (user.auth_provider === 'google') {
+                return res.status(401).json({ error: 'This account uses Google sign-in. Please use the Google login button.' });
+            }
+            if (user.auth_provider === 'github') {
+                return res.status(401).json({ error: 'This account uses GitHub sign-in. Please use the GitHub login button.' });
+            }
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Verify password
+        const isValid = await comparePassword(password, user.password_hash);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Generate JWT tokens
+        const tokens = generateTokenPair(user.id, user.email);
+
+        // Store refresh token
+        const refreshExpiresAt = new Date();
+        refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+        await supabaseAdmin.from('refresh_tokens').insert({
+            user_id: user.id,
+            token: tokens.refreshToken,
+            expires_at: refreshExpiresAt.toISOString()
+        });
+
+        // Remove password_hash from response
+        const { password_hash, ...userWithoutPassword } = user;
+
+        res.json({
+            user: userWithoutPassword,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken
+        });
+    } catch (error) {
+        console.error('V2 Login error:', error);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+/**
+ * POST /api/auth/v2/refresh
+ * Refresh access token using refresh token
+ */
+router.post('/v2/refresh', async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+
+        if (!refreshToken) {
+            return res.status(400).json({ error: 'Refresh token is required' });
+        }
+
+        // Verify refresh token
+        const payload = verifyToken(refreshToken);
+        if (!payload || payload.type !== 'refresh') {
+            return res.status(401).json({ error: 'Invalid refresh token' });
+        }
+
+        // Check if token exists in database and is not revoked
+        const { data: storedToken, error } = await supabaseAdmin
+            .from('refresh_tokens')
+            .select('*')
+            .eq('token', refreshToken)
+            .is('revoked_at', null)
+            .single();
+
+        if (error || !storedToken) {
+            return res.status(401).json({ error: 'Invalid or expired refresh token' });
+        }
+
+        // Check if expired
+        if (new Date(storedToken.expires_at) < new Date()) {
+            return res.status(401).json({ error: 'Refresh token has expired' });
+        }
+
+        // Generate new token pair
+        const tokens = generateTokenPair(payload.userId, payload.email);
+
+        // Revoke old refresh token
+        await supabaseAdmin
+            .from('refresh_tokens')
+            .update({ revoked_at: new Date().toISOString() })
+            .eq('token', refreshToken);
+
+        // Store new refresh token
+        const refreshExpiresAt = new Date();
+        refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+        await supabaseAdmin.from('refresh_tokens').insert({
+            user_id: payload.userId,
+            token: tokens.refreshToken,
+            expires_at: refreshExpiresAt.toISOString()
+        });
+
+        res.json({
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken
+        });
+    } catch (error) {
+        console.error('Token refresh error:', error);
+        res.status(500).json({ error: 'Failed to refresh token' });
+    }
+});
+
+/**
+ * POST /api/auth/v2/logout
+ * Logout user by revoking refresh token
+ */
+router.post('/v2/logout', async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+
+        if (refreshToken) {
+            // Revoke the refresh token
+            await supabaseAdmin
+                .from('refresh_tokens')
+                .update({ revoked_at: new Date().toISOString() })
+                .eq('token', refreshToken);
         }
 
         res.json({ message: 'Logged out successfully' });
     } catch (error) {
+        console.error('Logout error:', error);
         res.status(500).json({ error: 'Logout failed' });
     }
 });
@@ -330,6 +656,7 @@ router.post('/logout', async (req, res) => {
  * Get current user
  */
 router.get('/me', async (req, res) => {
+
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
