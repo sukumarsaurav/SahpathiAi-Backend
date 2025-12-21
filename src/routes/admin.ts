@@ -2113,22 +2113,36 @@ router.get('/analytics/content-stats', async (req, res) => {
             .from('resources')
             .select('*', { count: 'exact', head: true });
 
-        // Questions per subject (top 10)
-        const { data: subjectQuestions } = await supabase
-            .from('topics')
-            .select(`
-                subject_id,
-                subjects(name),
-                question_count
-            `);
+        // Questions per subject (top 10) - Count from questions table for accuracy
+        // First get all questions with their topic_id
+        const { data: allQuestionsWithTopics } = await supabase
+            .from('questions')
+            .select('id, topic_id')
+            .eq('is_active', true);
 
+        // Get all topics with their subject info
+        const { data: allTopicsWithSubjects } = await supabase
+            .from('topics')
+            .select('id, subject_id, subjects(id, name)')
+            .eq('is_active', true);
+
+        // Build topic_id -> subject mapping
+        const topicToSubject: Record<string, { id: string; name: string }> = {};
+        (allTopicsWithSubjects || []).forEach((t: any) => {
+            if (t.id && t.subject_id && t.subjects) {
+                topicToSubject[t.id] = { id: t.subject_id, name: t.subjects.name };
+            }
+        });
+
+        // Count questions per subject
         const subjectCounts: Record<string, { name: string; count: number }> = {};
-        (subjectQuestions || []).forEach((t: any) => {
-            if (t.subject_id && t.subjects) {
-                if (!subjectCounts[t.subject_id]) {
-                    subjectCounts[t.subject_id] = { name: t.subjects.name, count: 0 };
+        (allQuestionsWithTopics || []).forEach((q: any) => {
+            if (q.topic_id && topicToSubject[q.topic_id]) {
+                const subject = topicToSubject[q.topic_id];
+                if (!subjectCounts[subject.id]) {
+                    subjectCounts[subject.id] = { name: subject.name, count: 0 };
                 }
-                subjectCounts[t.subject_id].count += t.question_count || 0;
+                subjectCounts[subject.id].count += 1;
             }
         });
 
