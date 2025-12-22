@@ -41,6 +41,10 @@ import emailRoutes from './routes/email';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust proxy - required when behind reverse proxy (Vercel, Render, etc.)
+// This is needed for express-rate-limit to work correctly with X-Forwarded-For headers
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet());
 app.use(cors({
