@@ -1,7 +1,7 @@
 -- Sahpathi.ai Database Schema (Consolidated)
 -- This file contains the complete database structure including all migrations.
--- Run this SQL in Supabase SQL Editor to create all tables from scratch.
--- Last updated: 2024-12-16
+-- Uses custom JWT authentication (no Supabase Auth dependency).
+-- Last updated: 2024-12-22
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -162,10 +162,10 @@ CREATE TABLE IF NOT EXISTS resources (
 -- USER MANAGEMENT TABLES
 -- =====================================================
 
--- Users (extends Supabase auth.users)
+-- Users (Custom authentication - no Supabase auth dependency)
 CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  email VARCHAR(255) NOT NULL,
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email VARCHAR(255) NOT NULL UNIQUE,
   full_name VARCHAR(200),
   phone VARCHAR(20),
   username VARCHAR(50) UNIQUE,
@@ -175,8 +175,30 @@ CREATE TABLE IF NOT EXISTS users (
   location VARCHAR(200),
   role VARCHAR(20) DEFAULT 'student' CHECK (role IN ('student', 'admin', 'content_manager')),
   target_exam_id UUID REFERENCES exams(id),
+  -- Custom Authentication Fields
+  password_hash VARCHAR(255),
+  auth_provider VARCHAR(20) DEFAULT 'email' CHECK (auth_provider IN ('email', 'google', 'github')),
+  email_verified BOOLEAN DEFAULT false,
+  email_verified_at TIMESTAMPTZ,
+  email_verification_token VARCHAR(255),
+  email_verification_expires_at TIMESTAMPTZ,
+  password_reset_token VARCHAR(255),
+  password_reset_expires_at TIMESTAMPTZ,
+  oauth_provider_id VARCHAR(255),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Refresh Tokens (for JWT session management)
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token VARCHAR(500) NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked BOOLEAN DEFAULT false,
+  revoked_at TIMESTAMPTZ,
+  device_info TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- User Preferences
@@ -854,6 +876,131 @@ CREATE TABLE IF NOT EXISTS social_posts (
 );
 
 -- =====================================================
+-- CACHE VERSIONS TABLE
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS cache_versions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  exam_hierarchy_version VARCHAR(20) DEFAULT '1.0',
+  questions_version VARCHAR(20) DEFAULT '1.0',
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
+-- EMAIL SYSTEM TABLES
+-- =====================================================
+
+-- Email Templates
+CREATE TABLE IF NOT EXISTS email_templates (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(100) NOT NULL UNIQUE,
+  subject VARCHAR(255) NOT NULL,
+  html_content TEXT NOT NULL,
+  text_content TEXT,
+  variables JSONB DEFAULT '[]'::jsonb,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Email Settings (Provider configuration)
+CREATE TABLE IF NOT EXISTS email_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  provider VARCHAR(20) NOT NULL DEFAULT 'resend' CHECK (provider IN ('resend', 'smtp')),
+  from_email VARCHAR(255) NOT NULL DEFAULT 'onboarding@resend.dev',
+  from_name VARCHAR(100) DEFAULT 'SahpathiAi',
+  reply_to VARCHAR(255) DEFAULT 'faq@shirash.com',
+  is_active BOOLEAN DEFAULT true UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Email Logs (Delivery tracking)
+CREATE TABLE IF NOT EXISTS email_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  recipient_email VARCHAR(255) NOT NULL,
+  template_name VARCHAR(100),
+  subject VARCHAR(255),
+  status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'sent', 'delivered', 'bounced', 'failed')),
+  provider VARCHAR(20) NOT NULL CHECK (provider IN ('resend', 'smtp')),
+  provider_message_id VARCHAR(255),
+  utm_source VARCHAR(50),
+  utm_campaign VARCHAR(100),
+  error_message TEXT,
+  sent_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Email Verification Tokens
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  email VARCHAR(255) NOT NULL,
+  token VARCHAR(255) NOT NULL UNIQUE,
+  token_type VARCHAR(20) NOT NULL CHECK (token_type IN ('verification', 'password_reset')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
+-- MAP PRACTICE TABLES
+-- =====================================================
+
+-- Map Locations (States, Districts, Cities, etc.)
+CREATE TABLE IF NOT EXISTS map_locations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name VARCHAR(200) NOT NULL,
+  name_local VARCHAR(200),
+  location_type VARCHAR(50) NOT NULL,
+  parent_id UUID REFERENCES map_locations(id) ON DELETE CASCADE,
+  state_id UUID REFERENCES map_locations(id),
+  district_id UUID REFERENCES map_locations(id),
+  coordinates JSONB,
+  bounding_box JSONB,
+  geojson_feature_id VARCHAR(100),
+  difficulty_score INT DEFAULT 3 CHECK (difficulty_score >= 1 AND difficulty_score <= 5),
+  difficulty_factors JSONB,
+  metadata JSONB,
+  alternate_names TEXT[],
+  search_text TEXT,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Map Practice Sessions
+CREATE TABLE IF NOT EXISTS map_practice_sessions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  practice_mode VARCHAR(20) DEFAULT 'practice' CHECK (practice_mode IN ('practice', 'timed', 'speed')),
+  question_types TEXT[] DEFAULT ARRAY['map_state'],
+  difficulty_range INT[] DEFAULT ARRAY[1, 3],
+  total_questions INT DEFAULT 10,
+  time_limit_seconds INT,
+  questions_answered INT DEFAULT 0,
+  correct_answers INT DEFAULT 0,
+  total_time_seconds INT DEFAULT 0,
+  status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active', 'completed', 'exited')),
+  started_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+-- Map Practice Answers
+CREATE TABLE IF NOT EXISTS map_practice_answers (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id UUID REFERENCES map_practice_sessions(id) ON DELETE CASCADE,
+  question_id UUID REFERENCES questions(id) ON DELETE CASCADE,
+  answer_type VARCHAR(20) CHECK (answer_type IN ('map_click', 'text', 'multi_click')),
+  clicked_regions TEXT[],
+  clicked_point JSONB,
+  text_answers TEXT[],
+  is_correct BOOLEAN DEFAULT false,
+  partial_score DECIMAL(5, 2),
+  time_taken_seconds INT DEFAULT 0,
+  answered_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- =====================================================
 -- INDEXES FOR PERFORMANCE
 -- =====================================================
 
@@ -960,6 +1107,74 @@ CREATE INDEX IF NOT EXISTS idx_daily_sessions_active ON daily_practice_sessions(
 WHERE status = 'active';
 
 -- =====================================================
+-- FOREIGN KEY INDEXES (for JOIN performance and FK checks)
+-- =====================================================
+
+-- Auth/Users
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_auth_provider ON users(auth_provider);
+CREATE INDEX IF NOT EXISTS idx_users_email_verification_token ON users(email_verification_token);
+CREATE INDEX IF NOT EXISTS idx_users_password_reset_token ON users(password_reset_token);
+CREATE INDEX IF NOT EXISTS idx_users_target_exam_id ON users(target_exam_id);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_preferred_language_id ON user_preferences(preferred_language_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+
+-- Admin & Settings
+CREATE INDEX IF NOT EXISTS idx_admin_settings_updated_by ON admin_settings(updated_by);
+
+-- Marketing System
+CREATE INDEX IF NOT EXISTS idx_campaign_expenses_created_by ON campaign_expenses(created_by);
+CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_created_by ON marketing_campaigns(created_by);
+
+-- Chatbot System
+CREATE INDEX IF NOT EXISTS idx_chat_conversations_agent_id ON chat_conversations(agent_id);
+CREATE INDEX IF NOT EXISTS idx_chat_conversations_escalated_ticket_id ON chat_conversations(escalated_ticket_id);
+CREATE INDEX IF NOT EXISTS idx_chat_conversations_language_id ON chat_conversations(language_id);
+CREATE INDEX IF NOT EXISTS idx_chatbot_agents_created_by ON chatbot_agents(created_by);
+CREATE INDEX IF NOT EXISTS idx_chatbot_agents_default_language_id ON chatbot_agents(default_language_id);
+CREATE INDEX IF NOT EXISTS idx_company_policies_created_by ON company_policies(created_by);
+CREATE INDEX IF NOT EXISTS idx_company_policies_language_id ON company_policies(language_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_created_by ON knowledge_documents(created_by);
+CREATE INDEX IF NOT EXISTS idx_guest_inquiries_responded_by ON guest_inquiries(responded_by);
+
+-- Tests & Questions
+CREATE INDEX IF NOT EXISTS idx_custom_test_questions_question_id ON custom_test_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_daily_practice_questions_question_id ON daily_practice_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_marathon_answers_question_id ON marathon_answers(question_id);
+CREATE INDEX IF NOT EXISTS idx_marathon_question_queue_question_id ON marathon_question_queue(question_id);
+CREATE INDEX IF NOT EXISTS idx_marathon_sessions_last_question_id ON marathon_sessions(last_question_id);
+CREATE INDEX IF NOT EXISTS idx_question_exam_history_exam_id ON question_exam_history(exam_id);
+CREATE INDEX IF NOT EXISTS idx_question_translations_language_id ON question_translations(language_id);
+CREATE INDEX IF NOT EXISTS idx_saved_questions_question_id ON saved_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_test_questions_question_id ON test_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_test_questions_test_id ON test_questions(test_id);
+CREATE INDEX IF NOT EXISTS idx_tests_exam_id ON tests(exam_id);
+CREATE INDEX IF NOT EXISTS idx_tests_test_category_id ON tests(test_category_id);
+CREATE INDEX IF NOT EXISTS idx_user_mistakes_question_id ON user_mistakes(question_id);
+CREATE INDEX IF NOT EXISTS idx_test_attempts_language_id ON test_attempts(language_id);
+
+-- Payments & Subscriptions
+CREATE INDEX IF NOT EXISTS idx_payment_orders_plan_id ON payment_orders(plan_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_promo_code_id ON payment_orders(promo_code_id);
+CREATE INDEX IF NOT EXISTS idx_promo_code_usages_payment_order_id ON promo_code_usages(payment_order_id);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_plan_id ON user_subscriptions(plan_id);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user_id ON user_subscriptions(user_id);
+
+-- Referrals & Resources
+CREATE INDEX IF NOT EXISTS idx_referrals_referred_id ON referrals(referred_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id);
+CREATE INDEX IF NOT EXISTS idx_resources_language_id ON resources(language_id);
+
+-- Support System
+CREATE INDEX IF NOT EXISTS idx_support_messages_sender_id ON support_messages(sender_id);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_assigned_to ON support_tickets(assigned_to);
+
+-- Social Accounts
+CREATE INDEX IF NOT EXISTS idx_social_accounts_connected_by ON social_accounts(connected_by);
+CREATE INDEX IF NOT EXISTS idx_social_posts_created_by ON social_posts(created_by);
+
+-- =====================================================
 -- ROW LEVEL SECURITY (RLS)
 -- =====================================================
 
@@ -988,6 +1203,7 @@ ALTER TABLE daily_practice_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_practice_questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_progress ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payment_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE refresh_tokens ENABLE ROW LEVEL SECURITY;
 
 -- Content tables (PUBLIC READ)
 ALTER TABLE exam_categories ENABLE ROW LEVEL SECURITY;
@@ -1021,6 +1237,20 @@ ALTER TABLE promo_code_usages ENABLE ROW LEVEL SECURITY;
 
 -- Admin settings
 ALTER TABLE admin_settings ENABLE ROW LEVEL SECURITY;
+
+-- Cache versions (public read)
+ALTER TABLE cache_versions ENABLE ROW LEVEL SECURITY;
+
+-- Email system tables (admin only)
+ALTER TABLE email_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE email_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE email_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE email_verification_tokens ENABLE ROW LEVEL SECURITY;
+
+-- Map practice tables
+ALTER TABLE map_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE map_practice_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE map_practice_answers ENABLE ROW LEVEL SECURITY;
 
 -- Marketing/analytics tables (admin access only)
 ALTER TABLE website_visitors ENABLE ROW LEVEL SECURITY;
@@ -1069,6 +1299,17 @@ CREATE POLICY payment_orders_policy ON payment_orders FOR ALL USING (auth.uid() 
 -- User-specific policies for concept stats and learning patterns
 CREATE POLICY user_concept_stats_policy ON user_concept_stats FOR ALL USING (auth.uid() = user_id);
 CREATE POLICY user_learning_patterns_policy ON user_learning_patterns FOR ALL USING (auth.uid() = user_id);
+
+-- Refresh tokens policy (users can only access their own tokens)
+CREATE POLICY refresh_tokens_policy ON refresh_tokens FOR ALL 
+  USING (
+    (SELECT auth.uid()) = user_id 
+    OR is_admin_or_content_manager()
+  )
+  WITH CHECK (
+    (SELECT auth.uid()) = user_id 
+    OR is_admin_or_content_manager()
+  );
 
 -- =====================================================
 -- RLS POLICIES - PUBLIC READ ACCESS (Content tables)
@@ -1214,62 +1455,115 @@ FOR ALL USING (
   (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
 );
 
+-- Cache versions (public read access)
+CREATE POLICY cache_versions_read ON cache_versions FOR SELECT USING (true);
+
+-- Email system policies (admin only)
+CREATE POLICY email_templates_policy ON email_templates FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+CREATE POLICY email_settings_policy ON email_settings FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+CREATE POLICY email_logs_policy ON email_logs FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+CREATE POLICY email_verification_tokens_policy ON email_verification_tokens FOR ALL 
+  USING (
+    (SELECT auth.uid()) = user_id 
+    OR (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+  );
+
+-- Map practice policies
+CREATE POLICY map_locations_read ON map_locations FOR SELECT USING (true);
+CREATE POLICY map_locations_admin ON map_locations FOR ALL USING (
+  (SELECT role FROM users WHERE id = auth.uid()) IN ('admin', 'content_manager')
+);
+CREATE POLICY map_practice_sessions_policy ON map_practice_sessions FOR ALL 
+  USING ((SELECT auth.uid()) = user_id);
+CREATE POLICY map_practice_answers_policy ON map_practice_answers FOR ALL 
+  USING (session_id IN (SELECT id FROM map_practice_sessions WHERE user_id = (SELECT auth.uid())));
+
 -- =====================================================
 -- HELPER FUNCTIONS
 -- =====================================================
 
--- Function to handle new user signup
--- Automatically inserts a row into public.users when a new user is created in auth.users
-CREATE OR REPLACE FUNCTION public.handle_new_user()
+-- Optimized admin check function (uses SELECT for initplan optimization)
+CREATE OR REPLACE FUNCTION is_admin_or_content_manager()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM users WHERE id = (SELECT auth.uid()) AND role IN ('admin', 'content_manager')
+  );
+$$;
+
+-- Function to check if current user is admin only
+CREATE OR REPLACE FUNCTION is_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM users WHERE id = (SELECT auth.uid()) AND role = 'admin'
+  );
+$$;
+
+-- Secure function to fetch the current user's role without triggering RLS
+CREATE OR REPLACE FUNCTION get_my_role()
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+STABLE
+AS $$
+  SELECT role FROM users WHERE id = auth.uid();
+$$;
+
+-- Generic updated_at trigger function
+CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-  INSERT INTO public.users (id, email, full_name, avatar_url)
-  VALUES (
-    NEW.id,
-    NEW.email,
-    NEW.raw_user_meta_data->>'full_name',
-    NEW.raw_user_meta_data->>'avatar_url'
-  );
+  NEW.updated_at = NOW();
   RETURN NEW;
 END;
 $$;
 
--- Trigger to call the function on every new user creation
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-CREATE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
-
 -- Generate Support Ticket Number
 CREATE OR REPLACE FUNCTION generate_ticket_number()
-RETURNS TEXT AS $$
+RETURNS TEXT
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
 DECLARE
   ticket_num TEXT;
   counter INT;
 BEGIN
-  -- Get count of tickets today
   SELECT COUNT(*) + 1 INTO counter 
   FROM support_tickets 
   WHERE DATE(created_at) = CURRENT_DATE;
   
-  -- Format: TKT-YYYYMMDD-XXXX
   ticket_num := 'TKT-' || TO_CHAR(NOW(), 'YYYYMMDD') || '-' || LPAD(counter::TEXT, 4, '0');
   
   RETURN ticket_num;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 -- Generate Question Content Hash (for AI duplicate detection)
 CREATE OR REPLACE FUNCTION generate_question_hash(question_text TEXT)
 RETURNS VARCHAR(64)
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
-  -- Normalize: lowercase, trim whitespace, remove extra spaces
   RETURN encode(
     sha256(
       regexp_replace(
@@ -1284,15 +1578,44 @@ $$;
 
 -- Increment Promo Code Usage Count
 CREATE OR REPLACE FUNCTION increment_promo_uses(promo_id UUID)
-RETURNS void
+RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
 BEGIN
   UPDATE promo_codes
   SET current_uses = current_uses + 1,
       updated_at = NOW()
   WHERE id = promo_id;
+END;
+$$;
+
+-- Update conversation message count on new chat message
+CREATE OR REPLACE FUNCTION update_conversation_on_message()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE chat_conversations
+  SET 
+    last_message_at = NEW.created_at,
+    message_count = message_count + 1
+  WHERE id = NEW.conversation_id;
+  RETURN NEW;
+END;
+$$;
+
+-- Update visitor last visit timestamp
+CREATE OR REPLACE FUNCTION update_visitor_last_visit()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  NEW.last_visit_at = NOW();
+  RETURN NEW;
 END;
 $$;
 
