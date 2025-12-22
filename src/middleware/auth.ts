@@ -2,16 +2,22 @@ import { Request, Response, NextFunction } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { verifyToken } from '../utils/jwt';
 
+// Custom user interface
+export interface AuthenticatedUser {
+    id: string;
+    email: string;
+    preferred_language_id?: string;
+    target_exam_id?: string;
+}
+
 // Extend Express Request to include user
 declare global {
     namespace Express {
+        // Override the User interface to include our custom properties
+        interface User extends AuthenticatedUser { }
+
         interface Request {
-            user?: {
-                id: string;
-                email: string;
-                preferred_language_id?: string;
-                target_exam_id?: string;
-            };
+            user?: AuthenticatedUser;
         }
     }
 }

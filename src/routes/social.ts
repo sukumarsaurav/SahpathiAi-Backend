@@ -7,10 +7,11 @@ import express from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { metaGraphApi } from '../services/metaGraphApi';
 import crypto from 'crypto';
+import { verifyToken } from '../utils/jwt';
 
 const router = express.Router();
 
-// Middleware to check if user is admin
+// Middleware to check if user is admin (using custom JWT)
 const requireAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     try {
         const authHeader = req.headers.authorization;
@@ -19,24 +20,25 @@ const requireAdmin = async (req: express.Request, res: express.Response, next: e
         }
 
         const token = authHeader.split(' ')[1];
-        const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
 
-        if (error || !user) {
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid token' });
         }
 
         // Check if user is admin
         const { data: userData } = await supabaseAdmin
             .from('users')
-            .select('role')
-            .eq('id', user.id)
+            .select('id, email, role')
+            .eq('id', jwtPayload.userId)
             .single();
 
         if (userData?.role !== 'admin') {
             return res.status(403).json({ error: 'Admin access required' });
         }
 
-        (req as any).user = user;
+        (req as any).user = userData;
         (req as any).userData = userData;
         next();
     } catch (error) {

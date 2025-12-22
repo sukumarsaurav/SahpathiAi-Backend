@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { getAuthenticatedClient, supabaseAdmin } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import { hashPassword, validatePassword } from '../utils/password';
+import { emailService } from '../services/emailService';
 
 const router = Router();
 
@@ -307,15 +309,28 @@ router.put('/preferences', authenticate, async (req, res) => {
 
 /**
  * POST /api/user/change-password
- * Change password
+ * Change password (custom auth - bcrypt)
  */
 router.post('/change-password', authenticate, async (req, res) => {
     try {
         const { new_password } = req.body;
-        const supabase = getAuthenticatedClient(getToken(req));
-        const { error } = await supabase.auth.updateUser({
-            password: new_password
-        });
+
+        // Validate password
+        const passwordError = validatePassword(new_password);
+        if (passwordError) {
+            return res.status(400).json({ error: passwordError });
+        }
+
+        // Hash and update password in users table
+        const passwordHash = await hashPassword(new_password);
+        const { error } = await supabaseAdmin
+            .from('users')
+            .update({
+                password_hash: passwordHash,
+                auth_provider: 'email', // Ensure auth provider is set
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', req.user!.id);
 
         if (error) throw error;
 
@@ -328,28 +343,23 @@ router.post('/change-password', authenticate, async (req, res) => {
 
 /**
  * GET /api/user/auth-type
- * Get user's authentication provider type
+ * Get user's authentication provider type (from users table)
  */
 router.get('/auth-type', authenticate, async (req, res) => {
     try {
-        const supabase = getAuthenticatedClient(getToken(req));
-        const { data: { user }, error } = await supabase.auth.getUser();
+        // Get auth_provider from users table
+        const { data: user, error } = await supabaseAdmin
+            .from('users')
+            .select('auth_provider, email')
+            .eq('id', req.user!.id)
+            .single();
 
         if (error || !user) {
             return res.status(401).json({ error: 'Unable to get user info' });
         }
 
-        // Get provider from app_metadata or identities
-        let provider = 'email'; // default
-
-        if (user.app_metadata?.provider) {
-            provider = user.app_metadata.provider;
-        } else if (user.identities && user.identities.length > 0) {
-            provider = user.identities[0].provider;
-        }
-
         res.json({
-            provider,
+            provider: user.auth_provider || 'email',
             email: user.email
         });
     } catch (error) {
@@ -360,7 +370,7 @@ router.get('/auth-type', authenticate, async (req, res) => {
 
 /**
  * POST /api/user/forgot-password
- * Send password reset email
+ * Send password reset email (custom email service)
  */
 router.post('/forgot-password', async (req, res) => {
     try {
@@ -370,16 +380,15 @@ router.post('/forgot-password', async (req, res) => {
             return res.status(400).json({ error: 'Email is required' });
         }
 
-        const { error } = await supabaseAdmin.auth.resetPasswordForEmail(email, {
-            redirectTo: `${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?mode=reset-password`
-        });
+        // Use custom email service for password reset
+        await emailService.sendPasswordResetEmail(email);
 
-        if (error) throw error;
-
-        res.json({ message: 'Password reset email sent successfully' });
+        // Always return success to prevent email enumeration
+        res.json({ message: 'If an account exists, a password reset email has been sent' });
     } catch (error) {
         console.error('Forgot password error:', error);
-        res.status(500).json({ error: 'Failed to send password reset email' });
+        // Still return success to prevent enumeration
+        res.json({ message: 'If an account exists, a password reset email has been sent' });
     }
 });
 

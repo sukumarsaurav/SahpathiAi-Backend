@@ -6,6 +6,10 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
+// Initialize Passport OAuth
+import { passport, configurePassport } from './config/passport';
+configurePassport();
+
 // Import routes
 import authRoutes from './routes/auth';
 import languageRoutes from './routes/languages';
@@ -53,6 +57,10 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Initialize Passport middleware (OAuth)
+app.use(passport.initialize());
+
 // Health check
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });

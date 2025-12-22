@@ -4,6 +4,7 @@ import { supabase, supabaseAdmin } from '../db/supabase';
 import { emailService } from '../services/emailService';
 import { generateTokenPair, verifyToken } from '../utils/jwt';
 import { hashPassword, comparePassword, validatePassword } from '../utils/password';
+import { passport, OAuthUser } from '../config/passport';
 
 const router = Router();
 
@@ -651,6 +652,109 @@ router.post('/v2/logout', async (req, res) => {
     }
 });
 
+// ===================================
+// V2 OAUTH ENDPOINTS (Backend OAuth - No Supabase)
+// ===================================
+
+/**
+ * GET /api/auth/v2/google
+ * Initiate Google OAuth flow
+ */
+router.get('/v2/google', (req, res, next) => {
+    // Store return URL if provided
+    const returnUrl = req.query.returnUrl as string;
+    if (returnUrl) {
+        res.cookie('oauth_return_url', returnUrl, { maxAge: 5 * 60 * 1000, httpOnly: true });
+    }
+    passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
+});
+
+/**
+ * GET /api/auth/v2/google/callback
+ * Handle Google OAuth callback
+ */
+router.get('/v2/google/callback',
+    passport.authenticate('google', { session: false, failureRedirect: '/auth?error=google_failed' }),
+    async (req, res) => {
+        try {
+            const user = req.user as OAuthUser;
+            if (!user) {
+                return res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=no_user`);
+            }
+
+            // Generate JWT tokens
+            const tokens = generateTokenPair(user.id, user.email);
+
+            // Store refresh token
+            const refreshExpiresAt = new Date();
+            refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+            await supabaseAdmin.from('refresh_tokens').insert({
+                user_id: user.id,
+                token: tokens.refreshToken,
+                expires_at: refreshExpiresAt.toISOString()
+            });
+
+            // Redirect to frontend with tokens
+            const frontendUrl = process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app';
+            const redirectPath = user.isNewUser ? '/onboarding' : '/dashboard';
+            res.redirect(`${frontendUrl}/auth/callback?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
+        } catch (error) {
+            console.error('Google OAuth callback error:', error);
+            res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=oauth_failed`);
+        }
+    }
+);
+
+/**
+ * GET /api/auth/v2/github
+ * Initiate GitHub OAuth flow
+ */
+router.get('/v2/github', (req, res, next) => {
+    const returnUrl = req.query.returnUrl as string;
+    if (returnUrl) {
+        res.cookie('oauth_return_url', returnUrl, { maxAge: 5 * 60 * 1000, httpOnly: true });
+    }
+    passport.authenticate('github', { scope: ['user:email'], session: false })(req, res, next);
+});
+
+/**
+ * GET /api/auth/v2/github/callback
+ * Handle GitHub OAuth callback
+ */
+router.get('/v2/github/callback',
+    passport.authenticate('github', { session: false, failureRedirect: '/auth?error=github_failed' }),
+    async (req, res) => {
+        try {
+            const user = req.user as OAuthUser;
+            if (!user) {
+                return res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=no_user`);
+            }
+
+            // Generate JWT tokens
+            const tokens = generateTokenPair(user.id, user.email);
+
+            // Store refresh token
+            const refreshExpiresAt = new Date();
+            refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+            await supabaseAdmin.from('refresh_tokens').insert({
+                user_id: user.id,
+                token: tokens.refreshToken,
+                expires_at: refreshExpiresAt.toISOString()
+            });
+
+            // Redirect to frontend with tokens
+            const frontendUrl = process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app';
+            const redirectPath = user.isNewUser ? '/onboarding' : '/dashboard';
+            res.redirect(`${frontendUrl}/auth/callback?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
+        } catch (error) {
+            console.error('GitHub OAuth callback error:', error);
+            res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=oauth_failed`);
+        }
+    }
+);
+
 /**
  * GET /api/auth/me
  * Get current user
@@ -664,28 +768,32 @@ router.get('/me', async (req, res) => {
         }
 
         const token = authHeader.substring(7);
-        const { data: { user }, error } = await supabase.auth.getUser(token);
 
-        if (error || !user) {
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid token' });
         }
+
+        const userId = jwtPayload.userId;
+        const userEmail = jwtPayload.email;
 
         // Fetch profile using admin client
         let { data: profile, error: profileError } = await supabaseAdmin
             .from('users')
             .select('*, preferred_language:languages(*), target_exam:exams(*)')
-            .eq('id', user.id)
+            .eq('id', userId)
             .single();
 
         // If profile doesn't exist, create it
         if (profileError && profileError.code === 'PGRST116') {
-            console.log('User profile not found in /me, creating one for:', user.email);
+            console.log('User profile not found in /me, creating one for:', userEmail);
             const { data: newProfile } = await supabaseAdmin
                 .from('users')
                 .insert({
-                    id: user.id,
-                    email: user.email,
-                    full_name: user.email?.split('@')[0] || 'User',
+                    id: userId,
+                    email: userEmail,
+                    full_name: userEmail?.split('@')[0] || 'User',
                 })
                 .select('*, preferred_language:languages(*), target_exam:exams(*)')
                 .single();
@@ -693,9 +801,9 @@ router.get('/me', async (req, res) => {
             profile = newProfile;
 
             // Also create related records (ignore errors if already exist)
-            try { await supabaseAdmin.from('user_stats').insert({ user_id: user.id }); } catch (e) { }
-            try { await supabaseAdmin.from('user_preferences').insert({ user_id: user.id }); } catch (e) { }
-            try { await supabaseAdmin.from('wallets').insert({ user_id: user.id, balance: 0 }); } catch (e) { }
+            try { await supabaseAdmin.from('user_stats').insert({ user_id: userId }); } catch (e) { }
+            try { await supabaseAdmin.from('user_preferences').insert({ user_id: userId }); } catch (e) { }
+            try { await supabaseAdmin.from('wallets').insert({ user_id: userId, balance: 0 }); } catch (e) { }
 
             // Generate unique referral code for new user
             try {
@@ -703,7 +811,7 @@ router.get('/me', async (req, res) => {
                 const randomPart = Math.random().toString(36).substring(2, 7).toUpperCase();
                 const code = `${prefix}${randomPart}`;
                 await supabaseAdmin.from('referral_codes').insert({
-                    user_id: user.id,
+                    user_id: userId,
                     code,
                     referral_link: `https://sahpathi-ai.vercel.app/auth?ref=${code}`
                 });
@@ -730,11 +838,14 @@ router.post('/track-session', async (req, res) => {
         }
 
         const token = authHeader.substring(7);
-        const { data: { user }, error } = await supabase.auth.getUser(token);
 
-        if (error || !user) {
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid token' });
         }
+
+        const userId = jwtPayload.userId;
 
         // Get User-Agent and IP
         const userAgent = req.headers['user-agent'] || '';
@@ -747,7 +858,7 @@ router.post('/track-session', async (req, res) => {
         const deviceInfo = parseUserAgent(userAgent);
 
         // Generate unique session ID
-        const sessionId = `${user.id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const sessionId = `${userId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
         // Get geolocation from IP (using ip-api.com - free, no API key needed)
         let geoData: {
@@ -796,7 +907,7 @@ router.post('/track-session', async (req, res) => {
         const { error: insertError } = await supabaseAdmin
             .from('user_sessions')
             .insert({
-                user_id: user.id,
+                user_id: userId,
                 session_id: sessionId,
                 device_type: deviceInfo.deviceType,
                 os: deviceInfo.os,
@@ -842,17 +953,21 @@ router.post('/send-verification', async (req, res) => {
         }
 
         const token = authHeader.substring(7);
-        const { data: { user }, error } = await supabase.auth.getUser(token);
 
-        if (error || !user) {
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid token' });
         }
+
+        const userId = jwtPayload.userId;
+        const userEmail = jwtPayload.email;
 
         // Get user profile
         const { data: profile } = await supabaseAdmin
             .from('users')
             .select('full_name, email_verified')
-            .eq('id', user.id)
+            .eq('id', userId)
             .single();
 
         if (profile?.email_verified) {
@@ -861,8 +976,8 @@ router.post('/send-verification', async (req, res) => {
 
         // Send verification email
         const result = await emailService.sendVerificationEmail(
-            user.id,
-            user.email!,
+            userId,
+            userEmail,
             profile?.full_name || 'User'
         );
 
@@ -963,8 +1078,10 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: 'Token and password are required' });
         }
 
-        if (password.length < 6) {
-            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        // Validate password
+        const passwordError = validatePassword(password);
+        if (passwordError) {
+            return res.status(400).json({ error: passwordError });
         }
 
         // Verify token
@@ -974,11 +1091,16 @@ router.post('/reset-password', async (req, res) => {
             return res.status(400).json({ error: tokenResult.error });
         }
 
-        // Update password using Supabase Admin
-        const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
-            tokenResult.userId!,
-            { password }
-        );
+        // Hash and update password in users table (custom auth)
+        const passwordHash = await hashPassword(password);
+        const { error: updateError } = await supabaseAdmin
+            .from('users')
+            .update({
+                password_hash: passwordHash,
+                auth_provider: 'email', // Ensure auth provider is set
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', tokenResult.userId);
 
         if (updateError) {
             console.error('Password update error:', updateError);

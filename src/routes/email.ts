@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { supabaseAdmin } from '../db/supabase';
 import { emailService } from '../services/emailService';
+import { verifyToken } from '../utils/jwt';
 
 const router = Router();
 
-// Middleware to check admin access
+// Middleware to check admin access (using custom JWT)
 async function requireAdmin(req: any, res: any, next: any) {
     try {
         const authHeader = req.headers.authorization;
@@ -13,23 +14,25 @@ async function requireAdmin(req: any, res: any, next: any) {
         }
 
         const token = authHeader.split(' ')[1];
-        const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
 
-        if (error || !user) {
+        // Verify custom JWT token
+        const jwtPayload = verifyToken(token);
+        if (!jwtPayload || jwtPayload.type !== 'access') {
             return res.status(401).json({ error: 'Invalid token' });
         }
 
+        // Check admin role in users table
         const { data: userData } = await supabaseAdmin
             .from('users')
-            .select('role')
-            .eq('id', user.id)
+            .select('id, email, role')
+            .eq('id', jwtPayload.userId)
             .single();
 
         if (userData?.role !== 'admin') {
             return res.status(403).json({ error: 'Admin access required' });
         }
 
-        req.user = user;
+        req.user = userData;
         next();
     } catch (error) {
         res.status(500).json({ error: 'Authentication failed' });
