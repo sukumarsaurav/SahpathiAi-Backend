@@ -6216,5 +6216,400 @@ router.get('/chatbot/stats', async (req, res) => {
     }
 });
 
+// =====================================================
+// MARKETING ANALYTICS ENDPOINTS
+// =====================================================
+
+// GET /api/admin/analytics/referral-sources
+// Returns user acquisition by UTM source with conversion data
+router.get('/analytics/referral-sources', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Get users with referral sources (last 30 days)
+        const { data: usersWithSources } = await supabase
+            .from('user_referral_sources')
+            .select(`
+                utm_source,
+                utm_medium,
+                user_id,
+                created_at,
+                users!inner(id, created_at)
+            `)
+            .gt('created_at', thirtyDaysAgo);
+
+        // Get paid users (for conversion calculation)
+        const { data: paidUsers } = await supabase
+            .from('user_subscriptions')
+            .select('user_id')
+            .eq('status', 'active');
+
+        const paidUserIds = new Set((paidUsers || []).map((p: any) => p.user_id));
+
+        // Aggregate by source
+        const sourceStats: Record<string, { users: number; conversions: number }> = {};
+        const dailyTrend: Record<string, Record<string, number>> = {};
+
+        (usersWithSources || []).forEach((ref: any) => {
+            const source = ref.utm_source || 'direct';
+            if (!sourceStats[source]) {
+                sourceStats[source] = { users: 0, conversions: 0 };
+            }
+            sourceStats[source].users++;
+            if (paidUserIds.has(ref.user_id)) {
+                sourceStats[source].conversions++;
+            }
+
+            // Daily trend
+            const date = new Date(ref.created_at).toISOString().split('T')[0];
+            if (!dailyTrend[date]) {
+                dailyTrend[date] = {};
+            }
+            dailyTrend[date][source] = (dailyTrend[date][source] || 0) + 1;
+        });
+
+        // Calculate totals
+        let totalUsers = 0;
+        let totalConversions = 0;
+        const bySource = Object.entries(sourceStats).map(([source, stats]) => {
+            totalUsers += stats.users;
+            totalConversions += stats.conversions;
+            return {
+                source,
+                users: stats.users,
+                conversions: stats.conversions,
+                conversion_rate: stats.users > 0
+                    ? (Math.round((stats.conversions / stats.users) * 10000) / 100).toFixed(2)
+                    : '0.00'
+            };
+        }).sort((a, b) => b.users - a.users);
+
+        // Build daily trend array
+        const daily_trend = [];
+        for (let i = 29; i >= 0; i--) {
+            const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+            const dateStr = d.toISOString().split('T')[0];
+            const dayData: any = { date: dateStr };
+
+            // Add each source's count for this day
+            ['facebook', 'instagram', 'whatsapp', 'youtube', 'google', 'linkedin', 'twitter', 'email', 'direct'].forEach(src => {
+                dayData[src] = dailyTrend[dateStr]?.[src] || 0;
+            });
+
+            daily_trend.push(dayData);
+        }
+
+        res.json({
+            total_users: totalUsers,
+            total_conversions: totalConversions,
+            by_source: bySource,
+            daily_trend
+        });
+    } catch (error) {
+        console.error('Error fetching referral sources:', error);
+        res.status(500).json({ error: 'Failed to fetch referral sources' });
+    }
+});
+
+// GET /api/admin/analytics/campaign-roi
+// Returns campaign ROI metrics
+router.get('/analytics/campaign-roi', async (req, res) => {
+    try {
+        // Get all campaigns with their expenses
+        const { data: campaigns } = await supabase
+            .from('marketing_campaigns')
+            .select(`
+                id,
+                name,
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                budget,
+                status,
+                start_date,
+                end_date,
+                created_at
+            `)
+            .order('created_at', { ascending: false });
+
+        // Get campaign expenses
+        const { data: expenses } = await supabase
+            .from('campaign_expenses')
+            .select('campaign_id, amount');
+
+        // Get users by campaign
+        const { data: usersWithCampaigns } = await supabase
+            .from('user_referral_sources')
+            .select(`
+                campaign_id,
+                user_id,
+                users!inner(id)
+            `)
+            .not('campaign_id', 'is', null);
+
+        // Get paid subscriptions
+        const { data: subscriptions } = await supabase
+            .from('user_subscriptions')
+            .select('user_id')
+            .eq('status', 'active');
+
+        const paidUserIds = new Set((subscriptions || []).map((s: any) => s.user_id));
+
+        // Aggregate expenses by campaign
+        const expensesBycamp: Record<string, number> = {};
+        (expenses || []).forEach((e: any) => {
+            expensesBycamp[e.campaign_id] = (expensesBycamp[e.campaign_id] || 0) + parseFloat(e.amount || 0);
+        });
+
+        // Aggregate users by campaign
+        const usersByCamp: Record<string, { total: number; paid: number }> = {};
+        (usersWithCampaigns || []).forEach((u: any) => {
+            if (!usersByCamp[u.campaign_id]) {
+                usersByCamp[u.campaign_id] = { total: 0, paid: 0 };
+            }
+            usersByCamp[u.campaign_id].total++;
+            if (paidUserIds.has(u.user_id)) {
+                usersByCamp[u.campaign_id].paid++;
+            }
+        });
+
+        // Calculate average revenue per paid user (estimate)
+        const avgRevenuePerUser = 299; // Average subscription value in INR
+
+        let totalSpent = 0;
+        let totalRevenue = 0;
+
+        const campaignData = (campaigns || []).map((camp: any) => {
+            const spent = expensesBycamp[camp.id] || 0;
+            const users = usersByCamp[camp.id]?.total || 0;
+            const paidUsers = usersByCamp[camp.id]?.paid || 0;
+            const revenue = paidUsers * avgRevenuePerUser;
+            const roi = spent > 0 ? ((revenue - spent) / spent) * 100 : 0;
+
+            totalSpent += spent;
+            totalRevenue += revenue;
+
+            return {
+                id: camp.id,
+                name: camp.name,
+                utm_source: camp.utm_source,
+                status: camp.status || 'active',
+                budget: camp.budget || 0,
+                total_spent: spent,
+                users_acquired: users,
+                cost_per_acquisition: users > 0 ? Math.round(spent / users) : 0,
+                revenue: revenue,
+                roi_percentage: roi.toFixed(1)
+            };
+        });
+
+        res.json({
+            summary: {
+                total_spent: totalSpent,
+                total_revenue: totalRevenue,
+                overall_roi: totalSpent > 0
+                    ? (((totalRevenue - totalSpent) / totalSpent) * 100).toFixed(1)
+                    : '0.0'
+            },
+            campaigns: campaignData
+        });
+    } catch (error) {
+        console.error('Error fetching campaign ROI:', error);
+        res.status(500).json({ error: 'Failed to fetch campaign ROI' });
+    }
+});
+
+// GET /api/admin/analytics/marketing-funnel
+// Returns marketing funnel data (visitors -> signups -> free -> paid)
+router.get('/analytics/marketing-funnel', async (req, res) => {
+    try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        // Get website visitors (last 30 days)
+        const { data: visitors, count: visitorCount } = await supabase
+            .from('website_visitors')
+            .select('visitor_id, utm_source, converted_to_signup, user_id', { count: 'exact' })
+            .gt('created_at', thirtyDaysAgo);
+
+        // Get all users (last 30 days)
+        const { data: users, count: userCount } = await supabase
+            .from('users')
+            .select('id, created_at', { count: 'exact' })
+            .gt('created_at', thirtyDaysAgo);
+
+        // Get paid users
+        const { data: paidSubs } = await supabase
+            .from('user_subscriptions')
+            .select('user_id')
+            .eq('status', 'active');
+
+        const paidUserIds = new Set((paidSubs || []).map((s: any) => s.user_id));
+
+        // Calculate funnel stages
+        const totalVisitors = visitorCount || 0;
+        const totalSignups = userCount || 0;
+        const userIds = new Set((users || []).map((u: any) => u.id));
+        const paidCount = Array.from(userIds).filter(id => paidUserIds.has(id)).length;
+        const freeCount = totalSignups - paidCount;
+
+        const funnel_stages = [
+            { stage: 'Visits', total: totalVisitors, percentage: 100 },
+            { stage: 'Signups', total: totalSignups, percentage: totalVisitors > 0 ? Math.round((totalSignups / totalVisitors) * 100) : 0 },
+            { stage: 'Free Users', total: freeCount, percentage: totalVisitors > 0 ? Math.round((freeCount / totalVisitors) * 100) : 0 },
+            { stage: 'Paid Users', total: paidCount, percentage: totalVisitors > 0 ? Math.round((paidCount / totalVisitors) * 100) : 0 }
+        ];
+
+        // Aggregate by source
+        const sourceColors: Record<string, string> = {
+            facebook: '#1877F2',
+            instagram: '#E4405F',
+            whatsapp: '#25D366',
+            youtube: '#FF0000',
+            linkedin: '#0A66C2',
+            twitter: '#1DA1F2',
+            google: '#4285F4',
+            direct: '#6B7280',
+            email: '#F59E0B',
+            referral: '#8B5CF6'
+        };
+
+        // Get referral sources with user data
+        const { data: refSources } = await supabase
+            .from('user_referral_sources')
+            .select('utm_source, user_id, users!inner(id)')
+            .gt('created_at', thirtyDaysAgo);
+
+        // Aggregate by source
+        const bySourceMap: Record<string, { visits: number; registrations: number; free: number; paid: number }> = {};
+
+        // Count visitors by source
+        (visitors || []).forEach((v: any) => {
+            const source = v.utm_source || 'direct';
+            if (!bySourceMap[source]) {
+                bySourceMap[source] = { visits: 0, registrations: 0, free: 0, paid: 0 };
+            }
+            bySourceMap[source].visits++;
+        });
+
+        // Count registrations and conversions by source
+        (refSources || []).forEach((r: any) => {
+            const source = r.utm_source || 'direct';
+            if (!bySourceMap[source]) {
+                bySourceMap[source] = { visits: 0, registrations: 0, free: 0, paid: 0 };
+            }
+            bySourceMap[source].registrations++;
+            if (paidUserIds.has(r.user_id)) {
+                bySourceMap[source].paid++;
+            } else {
+                bySourceMap[source].free++;
+            }
+        });
+
+        const by_source = Object.entries(bySourceMap).map(([source, data]) => ({
+            source,
+            color: sourceColors[source] || '#6B7280',
+            visits: data.visits,
+            registrations: data.registrations,
+            free_users: data.free,
+            paid_users: data.paid,
+            conversion_rate: {
+                visit_to_signup: data.visits > 0 ? Math.round((data.registrations / data.visits) * 100) : 0,
+                signup_to_paid: data.registrations > 0 ? Math.round((data.paid / data.registrations) * 100) : 0
+            }
+        })).sort((a, b) => b.registrations - a.registrations);
+
+        // Calculate insights
+        const sourcesWithConversions = by_source.filter(s => s.registrations > 0);
+        const best_performing = sourcesWithConversions.reduce((best: any, curr) => {
+            if (!best || curr.conversion_rate.signup_to_paid > best.signup_to_paid_rate) {
+                return { source: curr.source, signup_to_paid_rate: curr.conversion_rate.signup_to_paid };
+            }
+            return best;
+        }, null);
+
+        const worst_performing = sourcesWithConversions.reduce((worst: any, curr) => {
+            if (!worst || curr.conversion_rate.signup_to_paid < worst.signup_to_paid_rate) {
+                return { source: curr.source, signup_to_paid_rate: curr.conversion_rate.signup_to_paid };
+            }
+            return worst;
+        }, null);
+
+        res.json({
+            funnel_stages,
+            by_source,
+            insights: {
+                best_performing,
+                worst_performing,
+                total_visitors: totalVisitors,
+                overall_conversion_to_paid: totalVisitors > 0 ? Math.round((paidCount / totalVisitors) * 100) : 0
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching marketing funnel:', error);
+        res.status(500).json({ error: 'Failed to fetch marketing funnel' });
+    }
+});
+
+// POST /api/admin/campaigns
+// Create a new marketing campaign
+router.post('/campaigns', async (req, res) => {
+    try {
+        const {
+            name,
+            description,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            budget,
+            start_date,
+            end_date,
+            status
+        } = req.body;
+
+        if (!name) {
+            return res.status(400).json({ error: 'Campaign name is required' });
+        }
+
+        const { data, error } = await supabase
+            .from('marketing_campaigns')
+            .insert({
+                name,
+                description,
+                utm_source,
+                utm_medium,
+                utm_campaign: utm_campaign || name.toLowerCase().replace(/\s+/g, '_'),
+                budget: budget || 0,
+                start_date,
+                end_date,
+                status: status || 'active'
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (error) {
+        console.error('Error creating campaign:', error);
+        res.status(500).json({ error: 'Failed to create campaign' });
+    }
+});
+
+// GET /api/admin/campaigns
+// Get all marketing campaigns
+router.get('/campaigns', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('marketing_campaigns')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('Error fetching campaigns:', error);
+        res.status(500).json({ error: 'Failed to fetch campaigns' });
+    }
+});
+
 export default router;
 
