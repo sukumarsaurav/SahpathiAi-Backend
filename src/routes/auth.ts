@@ -698,7 +698,7 @@ router.get('/v2/google/callback',
             // Redirect to frontend with tokens
             const frontendUrl = process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app';
             const redirectPath = user.isNewUser ? '/onboarding' : '/dashboard';
-            res.redirect(`${frontendUrl}/auth/callback?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
+            res.redirect(`${frontendUrl}/auth?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
         } catch (error) {
             console.error('Google OAuth callback error:', error);
             res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=oauth_failed`);
@@ -747,7 +747,7 @@ router.get('/v2/github/callback',
             // Redirect to frontend with tokens
             const frontendUrl = process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app';
             const redirectPath = user.isNewUser ? '/onboarding' : '/dashboard';
-            res.redirect(`${frontendUrl}/auth/callback?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
+            res.redirect(`${frontendUrl}/auth?token=${tokens.accessToken}&refresh=${tokens.refreshToken}&redirect=${redirectPath}`);
         } catch (error) {
             console.error('GitHub OAuth callback error:', error);
             res.redirect(`${process.env.FRONTEND_URL || 'https://sahpathi-ai.vercel.app'}/auth?error=oauth_failed`);
