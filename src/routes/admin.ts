@@ -5738,6 +5738,65 @@ router.delete('/chatbot/agents/:id', async (req, res) => {
     }
 });
 
+// POST /api/admin/chatbot/upload-avatar - Upload agent avatar image
+router.post('/chatbot/upload-avatar', async (req, res) => {
+    try {
+        const { fileData, fileName, fileType } = req.body;
+
+        if (!fileData || !fileName) {
+            return res.status(400).json({ error: 'fileData and fileName are required' });
+        }
+
+        // Validate file type
+        if (!fileType?.startsWith('image/')) {
+            return res.status(400).json({ error: 'Only image files are allowed' });
+        }
+
+        // Extract base64 data (remove data:image/...;base64, prefix if present)
+        const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+
+        // Convert base64 to buffer
+        const fileBuffer = Buffer.from(base64Data, 'base64');
+
+        // Validate file size (max 5MB)
+        if (fileBuffer.length > 5 * 1024 * 1024) {
+            return res.status(400).json({ error: 'File size must be less than 5MB' });
+        }
+
+        // Generate unique filename
+        const fileExt = fileName.split('.').pop() || 'png';
+        const uniqueFileName = `agent-${Date.now()}.${fileExt}`;
+        const filePath = `avatars/${uniqueFileName}`;
+
+        // Upload using supabase (admin client - bypasses RLS)
+        const { error: uploadError } = await supabase.storage
+            .from('user-pic')
+            .upload(filePath, fileBuffer, {
+                contentType: fileType,
+                upsert: true
+            });
+
+        if (uploadError) {
+            console.error('Supabase upload error:', uploadError);
+            throw new Error('Failed to upload file to storage');
+        }
+
+        // Get public URL
+        const { data: urlData } = supabase.storage
+            .from('user-pic')
+            .getPublicUrl(filePath);
+
+        res.json({
+            success: true,
+            url: urlData.publicUrl,
+            path: filePath
+        });
+    } catch (error: any) {
+        console.error('Error uploading avatar:', error);
+        res.status(500).json({ error: error.message || 'Failed to upload avatar' });
+    }
+});
+
 // --- POLICY CATEGORIES ---
 
 // GET /api/admin/chatbot/policy-categories
