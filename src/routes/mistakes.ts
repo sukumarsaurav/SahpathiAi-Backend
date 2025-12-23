@@ -299,6 +299,140 @@ router.get('/summary', authenticate, async (req, res) => {
 });
 
 /**
+ * GET /api/mistakes/summary-with-topics/:subjectId
+ * Get user's mistakes for a subject grouped by topics
+ * Returns: { total, topics: [{ id, name, count, mistakes: [...] }] }
+ */
+router.get('/summary-with-topics/:subjectId', authenticate, async (req, res) => {
+    try {
+        const { subjectId } = req.params;
+        const userId = req.user!.id;
+        const preferredLanguageId = req.user!.preferred_language_id;
+
+        // Resolve subjectId (might be exam_subjects id) to master subject_id
+        const { data: examSubject } = await supabaseAdmin
+            .from('exam_subjects')
+            .select('subject_id')
+            .eq('id', subjectId)
+            .single();
+
+        const masterSubjectId = examSubject ? examSubject.subject_id : subjectId;
+
+        // Get all user mistakes (unresolved)
+        const { data: allMistakes } = await supabaseAdmin
+            .from('user_mistakes')
+            .select('id, question_id, selected_option, retry_count, last_attempted, mastery_status')
+            .eq('user_id', userId)
+            .eq('is_resolved', false)
+            .order('retry_count', { ascending: false });
+
+        if (!allMistakes || allMistakes.length === 0) {
+            return res.json({ total: 0, topics: [] });
+        }
+
+        const questionIds = allMistakes.map(m => m.question_id);
+
+        // Fetch questions with topic info
+        const { data: questions } = await supabaseAdmin
+            .from('questions')
+            .select('id, topic_id, correct_answer_index')
+            .in('id', questionIds);
+
+        if (!questions) return res.json({ total: 0, topics: [] });
+
+        // Get topic IDs for filtering by subject
+        const topicIds = [...new Set(questions.filter(q => q.topic_id).map(q => q.topic_id))];
+        if (topicIds.length === 0) return res.json({ total: 0, topics: [] });
+
+        // Get topics that belong to this subject
+        const { data: topics } = await supabaseAdmin
+            .from('topics')
+            .select('id, name, subject_id')
+            .in('id', topicIds)
+            .eq('subject_id', masterSubjectId)
+            .order('name');
+
+        if (!topics || topics.length === 0) return res.json({ total: 0, topics: [] });
+
+        // Build lookups
+        const topicMap = new Map(topics.map(t => [t.id, t]));
+        const questionToTopic = new Map(
+            questions.filter(q => q.topic_id && topicMap.has(q.topic_id))
+                .map(q => [q.id, q.topic_id])
+        );
+        const questionMap = new Map(questions.map(q => [q.id, q]));
+
+        // Get translations
+        const filteredQuestionIds = Array.from(questionToTopic.keys());
+        const { data: allTranslations } = await supabaseAdmin
+            .from('question_translations')
+            .select('question_id, language_id, question_text, options, explanation')
+            .in('question_id', filteredQuestionIds);
+
+        const translationMap = new Map<string, any>();
+        if (allTranslations) {
+            for (const t of allTranslations) {
+                const existing = translationMap.get(t.question_id);
+                if (!existing || t.language_id === preferredLanguageId) {
+                    translationMap.set(t.question_id, t);
+                }
+            }
+        }
+
+        // Group mistakes by topic
+        const topicMistakesMap = new Map<string, any[]>();
+        for (const mistake of allMistakes) {
+            const topicId = questionToTopic.get(mistake.question_id);
+            if (!topicId) continue;
+
+            const question = questionMap.get(mistake.question_id);
+            const translation = translationMap.get(mistake.question_id);
+            const topic = topicMap.get(topicId);
+
+            const formattedMistake = {
+                id: mistake.id,
+                question_id: mistake.question_id,
+                question: translation?.question_text || 'Question text not available',
+                options: translation?.options || [],
+                explanation: translation?.explanation,
+                correct_answer: question?.correct_answer_index ?? 0,
+                selected_answer: mistake.selected_option,
+                topic: topic?.name,
+                topic_id: topicId,
+                retry_count: mistake.retry_count || 0,
+                mastery_status: mistake.mastery_status || 'not_started',
+                last_attempted: mistake.last_attempted
+            };
+
+            const existing = topicMistakesMap.get(topicId) || [];
+            existing.push(formattedMistake);
+            topicMistakesMap.set(topicId, existing);
+        }
+
+        // Build response with topics and their mistakes
+        const topicsWithMistakes = topics
+            .filter(t => topicMistakesMap.has(t.id))
+            .map(t => ({
+                id: t.id,
+                name: t.name,
+                count: topicMistakesMap.get(t.id)!.length,
+                mistakes: topicMistakesMap.get(t.id)!
+            }))
+            .sort((a, b) => b.count - a.count);
+
+        const total = topicsWithMistakes.reduce((sum, t) => sum + t.count, 0);
+
+        res.json({
+            total,
+            topics: topicsWithMistakes
+        });
+    } catch (error) {
+        console.error('Get mistakes by topics error:', error);
+        res.status(500).json({ error: 'Failed to fetch mistakes by topics' });
+    }
+});
+
+/**
  * GET /api/subjects/:subjectId/mistakes
  * Get user's mistakes for a subject
  */
