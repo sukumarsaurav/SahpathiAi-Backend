@@ -72,7 +72,12 @@ async function getApiKey(): Promise<string | null> {
 /**
  * Call OpenAI API
  */
-async function callOpenAI(messages: OpenAIMessage[], responseFormat?: 'json'): Promise<any> {
+interface CallOpenAIOptions {
+    temperature?: number;
+    top_p?: number;
+}
+
+async function callOpenAI(messages: OpenAIMessage[], responseFormat?: 'json', options?: CallOpenAIOptions): Promise<any> {
     const apiKey = await getApiKey();
     if (!apiKey) {
         throw new Error('OpenAI API key not configured. Please add it in Admin Settings.');
@@ -87,8 +92,9 @@ async function callOpenAI(messages: OpenAIMessage[], responseFormat?: 'json'): P
         body: JSON.stringify({
             model: 'gpt-4o-mini',
             messages,
-            temperature: 0.7,
+            temperature: options?.temperature ?? 0.7,
             max_tokens: 4096,
+            ...(options?.top_p && { top_p: options.top_p }),
             ...(responseFormat === 'json' && { response_format: { type: 'json_object' } })
         })
     });
@@ -330,7 +336,8 @@ Respond with JSON:
 }
 
 /**
- * Suggest new concepts for a topic based on existing concepts
+ * Suggest new atomic concept tags for a topic based on existing concepts
+ * Optimized for competitive exam MCQ tagging
  */
 export async function suggestNewConcepts(params: {
     topicName: string;
@@ -345,44 +352,56 @@ export async function suggestNewConcepts(params: {
         ? existingConcepts.map(c => `- ${c.name}${c.description ? `: ${c.description}` : ''}`).join('\n')
         : 'No existing concepts yet.';
 
-    const systemPrompt = `You are an expert curriculum designer specializing in creating comprehensive learning content for competitive exams.
-Your task is to suggest NEW concepts that are missing from a topic's coverage.`;
+    const systemPrompt = `You are an expert educational content categorizer specializing in creating atomic concept tags for competitive exam MCQs.
+Your role is to generate precise, tag-friendly concept names that can be used to classify and organize exam questions.`;
 
-    const userPrompt = `Suggest ${count} NEW concepts for the following topic that are NOT already covered:
+    const userPrompt = `Suggest ${count} NEW ATOMIC CONCEPT TAGS for the topic below.
 
 SUBJECT: ${subjectName}
 TOPIC: ${topicName}
 
-EXISTING CONCEPTS (do NOT suggest these):
+EXISTING CONCEPTS (DO NOT repeat or paraphrase these):
 ${existingList}
 
-Suggest concepts that:
-1. Are fundamental to understanding this topic
-2. Are commonly tested in competitive exams
-3. Fill gaps in the existing concept coverage
-4. Progress from basic to advanced understanding
+What to generate:
+- ONLY concepts that are commonly asked in competitive exams
+- Concepts must be usable as TAGS to assign MCQs
+- Each concept must cover ONE clear examinable idea
+- Prefer definition-based, feature-based, identification-based concepts
+- Progress from basic → advanced
+- Avoid syllabus wording, paragraphs, or umbrella concepts
 
-${customInstruction ? `SPECIAL INSTRUCTION FROM USER:\n${customInstruction}\n\nEnsure suggestions strictly follow the user's special instruction above.` : ''}
+${customInstruction ? `SPECIAL INSTRUCTION FROM USER:
+${customInstruction}
 
-Respond with JSON:
+Ensure suggestions strictly follow the user's special instruction above.` : ''}
+
+Respond STRICTLY in the following JSON format ONLY:
+
 {
   "suggestions": [
     {
-      "name": "Concept Name",
-      "description": "Brief description of what this concept covers",
-      "difficulty_level": 5
+      "name": "Short, precise concept name (tag-friendly)",
+      "description": "What exactly is tested from this concept in exams",
+      "difficulty_level": 1
     }
   ]
 }
 
-difficulty_level: 1-10 where 1=very easy, 10=very hard`;
+difficulty_level rules:
+1-2 = very basic factual
+3-4 = standard exam questions
+5-6 = high-frequency + conceptual
+7-8 = advanced/static + analytical
+9-10 = rare or deep analytical`;
 
     const response = await callOpenAI(
         [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
         ],
-        'json'
+        'json',
+        { temperature: 0.2, top_p: 0.9 }
     );
 
     const parsed = JSON.parse(response);
@@ -705,6 +724,24 @@ JSON format:
         const parsed = JSON.parse(response);
         const questions: GeneratedMapQuestion[] = parsed.questions || [];
         const warnings: string[] = [];
+
+        // Normalize correctAnswers to ensure it's always an array
+        for (const q of questions) {
+            if (!q.map_data) {
+                q.map_data = { mapType, correctAnswers: [] };
+            }
+            // Handle cases where AI returns string instead of array
+            if (typeof q.map_data.correctAnswers === 'string') {
+                q.map_data.correctAnswers = [q.map_data.correctAnswers];
+            } else if (!Array.isArray(q.map_data.correctAnswers)) {
+                q.map_data.correctAnswers = [];
+                warnings.push(`Question "${q.question_text?.substring(0, 50)}..." had invalid correctAnswers format`);
+            }
+            // Normalize highlightStates as well
+            if (q.map_data.highlightStates && !Array.isArray(q.map_data.highlightStates)) {
+                q.map_data.highlightStates = [];
+            }
+        }
 
         // Validate location names for non-state maps
         if (mapType !== 'state') {
