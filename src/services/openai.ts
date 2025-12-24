@@ -549,3 +549,204 @@ export async function testConnection(): Promise<boolean> {
         return false;
     }
 }
+
+// =====================================================
+// MAP QUESTION GENERATION
+// =====================================================
+
+// Known valid location names for map questions
+const INDIAN_STATES = [
+    'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
+    'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka',
+    'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram',
+    'Nagaland', 'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu',
+    'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
+    'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu',
+    'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry'
+];
+
+const WORLD_COUNTRIES = [
+    'Afghanistan', 'Albania', 'Algeria', 'Argentina', 'Australia', 'Austria',
+    'Bangladesh', 'Belgium', 'Brazil', 'Canada', 'Chile', 'China', 'Colombia',
+    'Cuba', 'Czech Republic', 'Denmark', 'Egypt', 'Ethiopia', 'Finland', 'France',
+    'Germany', 'Greece', 'Hungary', 'India', 'Indonesia', 'Iran', 'Iraq', 'Ireland',
+    'Israel', 'Italy', 'Japan', 'Kenya', 'Malaysia', 'Mexico', 'Morocco', 'Myanmar',
+    'Nepal', 'Netherlands', 'New Zealand', 'Nigeria', 'North Korea', 'Norway',
+    'Pakistan', 'Peru', 'Philippines', 'Poland', 'Portugal', 'Romania', 'Russia',
+    'Saudi Arabia', 'South Africa', 'South Korea', 'Spain', 'Sri Lanka', 'Sudan',
+    'Sweden', 'Switzerland', 'Thailand', 'Turkey', 'Ukraine', 'United Arab Emirates',
+    'United Kingdom', 'United States', 'Venezuela', 'Vietnam'
+];
+
+interface GeneratedMapQuestion {
+    question_text: string;
+    question_type: 'map_state' | 'map_multi' | 'map_fill_blank';
+    map_data: {
+        mapType: 'india' | 'world' | 'state';
+        stateName?: string;
+        correctAnswers: string[];
+        highlightStates?: string[];
+        maxSelections?: number;
+    };
+    blank_data?: {
+        blanks: { position: number; answers: string[]; hints?: string[] }[];
+        question_template: string;
+        case_sensitive?: boolean;
+    };
+    explanation: string;
+    difficulty: 'easy' | 'medium' | 'hard';
+}
+
+interface GenerateMapQuestionsParams {
+    mapType: 'india' | 'world' | 'state';
+    stateName?: string;
+    questionTypes: ('map_state' | 'map_multi' | 'map_fill_blank')[];
+    difficultyDistribution: { easy: number; medium: number; hard: number };
+    count: number;
+    customInstructions?: string;
+    existingQuestions?: string[];
+}
+
+/**
+ * Generate map-based geography questions using AI
+ */
+export async function generateMapQuestions(params: GenerateMapQuestionsParams): Promise<{
+    questions: GeneratedMapQuestion[];
+    warnings: string[];
+}> {
+    const { mapType, stateName, questionTypes, difficultyDistribution, count, customInstructions, existingQuestions } = params;
+
+    const total = count;
+    const easyCount = Math.round(total * difficultyDistribution.easy / 100);
+    const mediumCount = Math.round(total * difficultyDistribution.medium / 100);
+    const hardCount = total - easyCount - mediumCount;
+
+    let validLocations: string[];
+    let locationContext: string;
+
+    if (mapType === 'world') {
+        validLocations = WORLD_COUNTRIES;
+        locationContext = 'countries of the world';
+    } else if (mapType === 'india') {
+        validLocations = INDIAN_STATES;
+        locationContext = 'states and union territories of India';
+    } else {
+        locationContext = `districts of ${stateName || 'the selected state'} in India`;
+        validLocations = [];
+    }
+
+    const existingQuestionsContext = existingQuestions?.length
+        ? `\n\nDo NOT generate questions similar to these:\n${existingQuestions.slice(0, 15).map((q, i) => `${i + 1}. ${q}`).join('\n')}`
+        : '';
+
+    const questionTypeDesc = questionTypes.map(qt => {
+        if (qt === 'map_state') return 'Single Click: User clicks on ONE location';
+        if (qt === 'map_multi') return 'Multi Select: User clicks on MULTIPLE locations (2-5)';
+        if (qt === 'map_fill_blank') return 'Fill Blank: Map shows highlighted area, user types the name';
+        return qt;
+    }).join('\n');
+
+    const systemPrompt = `You are an expert geography educator creating map-based questions for exams.
+You specialize in interactive geography questions testing knowledge of ${locationContext}.
+
+RULES:
+1. Location names MUST be spelled exactly as in the valid locations list
+2. map_state: ONE correct answer
+3. map_multi: 2-5 correct answers
+4. map_fill_blank: Question template with _____ blank, map shows highlighted states
+5. Include educational explanations with interesting facts
+6. Vary questions: capitals, borders, rivers, climate, landmarks
+
+DIFFICULTY:
+- Easy: Basic identification of well-known locations
+- Medium: Relationship-based (borders, neighbors)
+- Hard: Multi-factor criteria, complex analysis`;
+
+    const userPrompt = `Generate ${count} map-based geography questions about ${locationContext}.
+
+MAP TYPE: ${mapType}${stateName ? ` (${stateName})` : ''}
+
+QUESTION TYPES:
+${questionTypeDesc}
+
+DIFFICULTY: Easy=${easyCount}, Medium=${mediumCount}, Hard=${hardCount}
+
+${mapType !== 'state' ? `VALID LOCATIONS:\n${validLocations.join(', ')}` : `Use accurate district names of ${stateName}.`}
+
+${customInstructions ? `INSTRUCTIONS: ${customInstructions}` : ''}${existingQuestionsContext}
+
+JSON format:
+{
+  "questions": [
+    {
+      "question_text": "Click on the state known as the 'Land of Five Rivers'",
+      "question_type": "map_state",
+      "map_data": {
+        "mapType": "${mapType}",
+        ${stateName ? `"stateName": "${stateName}",` : ''}
+        "correctAnswers": ["Punjab"],
+        "maxSelections": 1
+      },
+      "explanation": "Punjab means 'five rivers' referring to Indus tributaries.",
+      "difficulty": "easy"
+    }
+  ]
+}`;
+
+    try {
+        const response = await callOpenAI(
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+            ],
+            'json'
+        );
+
+        const parsed = JSON.parse(response);
+        const questions: GeneratedMapQuestion[] = parsed.questions || [];
+        const warnings: string[] = [];
+
+        // Validate location names for non-state maps
+        if (mapType !== 'state') {
+            for (const q of questions) {
+                const validatedAnswers: string[] = [];
+                for (const answer of q.map_data.correctAnswers) {
+                    if (validLocations.includes(answer)) {
+                        validatedAnswers.push(answer);
+                    } else {
+                        const found = validLocations.find(loc => loc.toLowerCase() === answer.toLowerCase());
+                        if (found) {
+                            validatedAnswers.push(found);
+                        } else {
+                            warnings.push(`Invalid location "${answer}" removed`);
+                        }
+                    }
+                }
+                q.map_data.correctAnswers = validatedAnswers;
+
+                if (q.map_data.highlightStates) {
+                    q.map_data.highlightStates = q.map_data.highlightStates.filter(hs => {
+                        if (validLocations.includes(hs)) return true;
+                        const found = validLocations.find(loc => loc.toLowerCase() === hs.toLowerCase());
+                        return !!found;
+                    });
+                }
+            }
+        }
+
+        const validQuestions = questions.filter(q => {
+            if (q.question_type === 'map_fill_blank') {
+                return q.blank_data && q.blank_data.blanks && q.blank_data.blanks.length > 0;
+            }
+            return q.map_data.correctAnswers.length > 0;
+        });
+
+        if (validQuestions.length < questions.length) {
+            warnings.push(`${questions.length - validQuestions.length} question(s) removed due to invalid answers`);
+        }
+
+        return { questions: validQuestions, warnings };
+    } catch (error: any) {
+        throw new Error(`Failed to generate map questions: ${error.message}`);
+    }
+}

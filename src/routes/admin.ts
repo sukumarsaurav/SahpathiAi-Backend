@@ -3921,6 +3921,7 @@ router.get('/promo-codes/:id/usages', async (req, res) => {
 
 import {
     generateQuestions as aiGenerateQuestions,
+    generateMapQuestions as aiGenerateMapQuestions,
     translateQuestion as aiTranslateQuestion,
     suggestConcepts as aiSuggestConcepts,
     checkForDuplicates,
@@ -4100,6 +4101,77 @@ router.post('/questions/generate-ai', async (req, res) => {
     } catch (error: any) {
         console.error('Error generating AI questions:', error);
         res.status(500).json({ error: error.message || 'Failed to generate questions' });
+    }
+});
+
+// POST /api/admin/questions/generate-map-ai - Generate map questions using AI
+router.post('/questions/generate-map-ai', async (req, res) => {
+    try {
+        const {
+            map_type,
+            state_name,
+            question_types,
+            difficulty_distribution,
+            count,
+            custom_instructions,
+            topic_id
+        } = req.body;
+
+        // Validate inputs
+        if (!map_type || !question_types?.length) {
+            return res.status(400).json({
+                error: 'map_type and question_types are required'
+            });
+        }
+
+        if (map_type === 'state' && !state_name) {
+            return res.status(400).json({
+                error: 'state_name is required for state map type'
+            });
+        }
+
+        // Fetch existing map questions for duplicate prevention
+        let existingTexts: string[] = [];
+        if (topic_id) {
+            const { data: existingQuestions } = await supabase
+                .from('questions')
+                .select('id')
+                .eq('topic_id', topic_id)
+                .in('question_type', ['map_state', 'map_multi', 'map_fill_blank'])
+                .limit(30);
+
+            if (existingQuestions?.length) {
+                const { data: translations } = await supabase
+                    .from('question_translations')
+                    .select('question_text')
+                    .in('question_id', existingQuestions.map(q => q.id))
+                    .limit(30);
+                existingTexts = translations?.map(t => t.question_text) || [];
+            }
+        }
+
+        // Generate map questions using AI
+        const result = await aiGenerateMapQuestions({
+            mapType: map_type,
+            stateName: state_name,
+            questionTypes: question_types,
+            difficultyDistribution: difficulty_distribution || { easy: 30, medium: 50, hard: 20 },
+            count: count || 5,
+            customInstructions: custom_instructions,
+            existingQuestions: existingTexts
+        });
+
+        res.json({
+            success: true,
+            questions: result.questions,
+            warnings: result.warnings,
+            map_type,
+            state_name,
+            requested: count || 5
+        });
+    } catch (error: any) {
+        console.error('Error generating AI map questions:', error);
+        res.status(500).json({ error: error.message || 'Failed to generate map questions' });
     }
 });
 
