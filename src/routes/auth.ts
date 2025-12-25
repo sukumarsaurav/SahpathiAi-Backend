@@ -819,6 +819,68 @@ router.post('/v2/google/verify-token', async (req, res) => {
     }
 });
 
+/**
+ * POST /api/auth/v2/google/token
+ * Alias for /api/auth/v2/google/verify-token
+ * Some mobile apps may use this shorter path
+ */
+router.post('/v2/google/token', async (req, res) => {
+    try {
+        const { idToken } = req.body;
+
+        if (!idToken) {
+            return res.status(400).json({ error: 'ID token is required' });
+        }
+
+        // Verify the Google ID token
+        const googleProfile = await verifyGoogleToken(idToken);
+
+        // Find or create user using the same logic as OAuth flow
+        const user = await findOrCreateOAuthUser(
+            googleProfile.email,
+            googleProfile.name,
+            googleProfile.picture,
+            'google',
+            googleProfile.googleId
+        );
+
+        // Generate JWT tokens
+        const tokens = generateTokenPair(user.id, user.email);
+
+        // Store refresh token
+        const refreshExpiresAt = new Date();
+        refreshExpiresAt.setDate(refreshExpiresAt.getDate() + 30);
+
+        await supabaseAdmin.from('refresh_tokens').insert({
+            user_id: user.id,
+            token: tokens.refreshToken,
+            expires_at: refreshExpiresAt.toISOString()
+        });
+
+        // Fetch full user profile
+        const { data: profile } = await supabaseAdmin
+            .from('users')
+            .select('*, preferred_language:languages(*), target_exam:exams(*)')
+            .eq('id', user.id)
+            .single();
+
+        res.json({
+            user: profile || user,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+            isNewUser: user.isNewUser
+        });
+    } catch (error) {
+        console.error('Google token verification error:', error);
+
+        // Return appropriate error message
+        if (error instanceof Error) {
+            return res.status(401).json({ error: error.message });
+        }
+
+        res.status(500).json({ error: 'Failed to verify Google token' });
+    }
+});
 
 /**
  * GET /api/auth/me
