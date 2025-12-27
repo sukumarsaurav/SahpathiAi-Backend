@@ -952,6 +952,133 @@ router.get('/questions/by-topic/:topicId/ids', async (req, res) => {
     }
 });
 
+// GET /api/admin/questions/export - Export questions for a topic in JSON format
+router.get('/questions/export', async (req, res) => {
+    try {
+        const { topicId } = req.query;
+
+        if (!topicId) {
+            return res.status(400).json({ error: 'topicId is required' });
+        }
+
+        // Get all questions for the topic
+        const { data: questions, error: questionsError } = await supabase
+            .from('questions')
+            .select(`
+                id,
+                topic_id,
+                difficulty,
+                correct_answer_index,
+                is_active,
+                question_type,
+                blank_data,
+                map_data,
+                created_at
+            `)
+            .eq('topic_id', topicId)
+            .eq('is_active', true)
+            .order('created_at', { ascending: false });
+
+        if (questionsError) throw questionsError;
+
+        if (!questions || questions.length === 0) {
+            return res.json({ questions: [], count: 0 });
+        }
+
+        const questionIds = questions.map((q: any) => q.id);
+
+        // Get English language ID for prioritization
+        const { data: englishLang } = await supabase
+            .from('languages')
+            .select('id')
+            .eq('code', 'en')
+            .single();
+        const englishLanguageId = englishLang?.id;
+
+        // Fetch all translations for these questions
+        const { data: translations } = await supabase
+            .from('question_translations')
+            .select('question_id, language_id, question_text, options, explanation')
+            .in('question_id', questionIds);
+
+        // Group translations by question_id
+        const translationsMap: Record<string, any[]> = {};
+        if (translations) {
+            translations.forEach((t: any) => {
+                if (!translationsMap[t.question_id]) translationsMap[t.question_id] = [];
+                translationsMap[t.question_id].push(t);
+            });
+        }
+
+        // Fetch concept associations
+        const { data: questionConcepts } = await supabase
+            .from('question_concepts')
+            .select(`
+                question_id,
+                concept:concepts (id, name)
+            `)
+            .in('question_id', questionIds);
+
+        // Group concepts by question_id
+        const conceptsMap: Record<string, string[]> = {};
+        if (questionConcepts) {
+            questionConcepts.forEach((qc: any) => {
+                if (!conceptsMap[qc.question_id]) conceptsMap[qc.question_id] = [];
+                if (qc.concept?.name) {
+                    conceptsMap[qc.question_id].push(qc.concept.name);
+                }
+            });
+        }
+
+        // Transform to export format
+        const exportData = questions.map((q: any) => {
+            const qTranslations = translationsMap[q.id] || [];
+
+            // Prioritize English translation
+            let translation = null;
+            if (englishLanguageId) {
+                translation = qTranslations.find((t: any) => t.language_id === englishLanguageId);
+            }
+            // Fallback to first available translation
+            if (!translation && qTranslations.length > 0) {
+                translation = qTranslations[0];
+            }
+
+            const result: any = {
+                topic_id: q.topic_id,
+                difficulty: q.difficulty,
+                correct_answer_index: q.correct_answer_index,
+                question_text: translation?.question_text || '',
+                options: translation?.options || [],
+                explanation: translation?.explanation || '',
+            };
+
+            // Add concept names if present
+            if (conceptsMap[q.id] && conceptsMap[q.id].length > 0) {
+                result.concept_names = conceptsMap[q.id];
+            }
+
+            // Add question type specific data
+            if (q.question_type === 'fill_blank' && q.blank_data) {
+                result.question_type = 'fill_blank';
+                result.blank_data = q.blank_data;
+            }
+
+            if (q.question_type && q.question_type.startsWith('map_') && q.map_data) {
+                result.question_type = q.question_type;
+                result.map_data = q.map_data;
+            }
+
+            return result;
+        });
+
+        res.json({ questions: exportData, count: exportData.length });
+    } catch (error) {
+        console.error('Error exporting questions:', error);
+        res.status(500).json({ error: 'Failed to export questions' });
+    }
+});
+
 // GET /api/admin/questions - List questions with pagination & filtering
 router.get('/questions', async (req, res) => {
     try {
