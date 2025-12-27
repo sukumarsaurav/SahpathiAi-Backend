@@ -525,8 +525,7 @@ router.post('/tests/bulk-rename', async (req, res) => {
                 title,
                 exam_id,
                 subject_id,
-                exam:exams(id, name),
-                subject:subjects(id, name)
+                exam:exams(id, name)
             `);
 
         if (categoryId) {
@@ -546,7 +545,17 @@ router.post('/tests/bulk-rename', async (req, res) => {
         for (const test of tests) {
             try {
                 const examName = (test.exam as any)?.name || 'General';
-                const subjectName = (test.subject as any)?.name || 'General';
+
+                // Fetch subject name separately (no direct FK relationship)
+                let subjectName = 'General';
+                if (test.subject_id) {
+                    const { data: subject } = await supabase
+                        .from('subjects')
+                        .select('name')
+                        .eq('id', test.subject_id)
+                        .single();
+                    if (subject) subjectName = subject.name;
+                }
 
                 // Extract topic name from current title or use a generic placeholder
                 let topicName = 'Practice Test';
