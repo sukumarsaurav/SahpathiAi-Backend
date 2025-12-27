@@ -1,6 +1,7 @@
 import express from 'express';
 import { supabaseAdmin as supabase } from '../db/supabase';
 import { authenticate } from '../middleware/auth';
+import supportAiService from '../services/supportAiService';
 
 const router = express.Router();
 
@@ -34,7 +35,7 @@ router.post('/tickets', async (req, res) => {
         const ticketNumber = await generateTicketNumber();
         const ticketSubject = subject || `${issue_type} - Support Request`;
 
-        // Create the ticket
+        // Create the ticket with AI handler mode
         const { data: ticket, error } = await supabase
             .from('support_tickets')
             .insert({
@@ -44,24 +45,43 @@ router.post('/tickets', async (req, res) => {
                 subject: ticketSubject,
                 description,
                 status: 'open',
-                priority: 'normal'
+                priority: 'normal',
+                handler_mode: 'ai' // Start with AI handling
             })
             .select()
             .single();
 
         if (error) throw error;
 
-        // Add the initial message
+        // Add the initial user message
         const { error: msgError } = await supabase
             .from('support_messages')
             .insert({
                 ticket_id: ticket.id,
                 sender_id: userId,
                 message: description,
-                is_from_admin: false
+                is_from_admin: false,
+                message_type: 'user'
             });
 
         if (msgError) console.error('Error creating initial message:', msgError);
+
+        // Generate AI welcome response based on issue type
+        try {
+            const welcomeMessage = supportAiService.getAIWelcomeMessage(issue_type);
+            await supabase
+                .from('support_messages')
+                .insert({
+                    ticket_id: ticket.id,
+                    sender_id: userId, // AI uses same sender_id but different message_type
+                    message: welcomeMessage,
+                    is_from_admin: true,
+                    message_type: 'ai',
+                    ai_tokens_used: 0 // Welcome message uses no tokens
+                });
+        } catch (aiError) {
+            console.error('Error generating AI welcome message:', aiError);
+        }
 
         res.status(201).json(ticket);
     } catch (error) {
@@ -237,6 +257,182 @@ router.get('/tickets/:id/messages', async (req, res) => {
     } catch (error) {
         console.error('Error fetching messages:', error);
         res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+});
+
+// POST /api/support/tickets/:id/ai-response - Get AI response for a message
+router.post('/tickets/:id/ai-response', async (req, res) => {
+    try {
+        const userId = (req as any).user.id;
+        const { id } = req.params;
+        const { message } = req.body;
+
+        if (!message) {
+            return res.status(400).json({ error: 'Message is required' });
+        }
+
+        // Verify user owns the ticket and it's in AI mode
+        const { data: ticket, error: ticketError } = await supabase
+            .from('support_tickets')
+            .select('id, issue_type, status, handler_mode')
+            .eq('id', id)
+            .eq('user_id', userId)
+            .single();
+
+        if (ticketError || !ticket) {
+            return res.status(404).json({ error: 'Ticket not found' });
+        }
+
+        if (ticket.status === 'closed') {
+            return res.status(400).json({ error: 'Cannot send message to a closed ticket' });
+        }
+
+        // Save user message first
+        const { data: userMsg, error: userMsgError } = await supabase
+            .from('support_messages')
+            .insert({
+                ticket_id: id,
+                sender_id: userId,
+                message,
+                is_from_admin: false,
+                message_type: 'user'
+            })
+            .select(`
+                *,
+                sender:users(id, full_name, avatar_url, role)
+            `)
+            .single();
+
+        if (userMsgError) throw userMsgError;
+
+        // Check if user explicitly wants human
+        const wantsHuman = supportAiService.detectEscalationIntent(message);
+
+        if (wantsHuman || ticket.handler_mode === 'human') {
+            // User wants human, return transfer suggestion
+            res.json({
+                userMessage: userMsg,
+                aiResponse: null,
+                shouldTransfer: true,
+                transferReason: 'User requested human agent'
+            });
+            return;
+        }
+
+        // Generate AI response
+        const aiResult = await supportAiService.generateSupportResponse(
+            id,
+            message,
+            ticket.issue_type
+        );
+
+        // Save AI response
+        const { data: aiMsg, error: aiMsgError } = await supabase
+            .from('support_messages')
+            .insert({
+                ticket_id: id,
+                sender_id: userId,
+                message: aiResult.message,
+                is_from_admin: true,
+                message_type: 'ai',
+                ai_tokens_used: aiResult.tokensUsed
+            })
+            .select(`
+                *,
+                sender:users(id, full_name, avatar_url, role)
+            `)
+            .single();
+
+        if (aiMsgError) throw aiMsgError;
+
+        // Update ticket updated_at
+        await supabase
+            .from('support_tickets')
+            .update({ updated_at: new Date().toISOString() })
+            .eq('id', id);
+
+        res.json({
+            userMessage: userMsg,
+            aiResponse: aiMsg,
+            shouldTransfer: aiResult.shouldEscalate,
+            transferReason: aiResult.escalationReason,
+            tokensUsed: aiResult.tokensUsed
+        });
+    } catch (error) {
+        console.error('Error getting AI response:', error);
+        res.status(500).json({ error: 'Failed to get AI response' });
+    }
+});
+
+// POST /api/support/tickets/:id/transfer-to-human - Transfer ticket to human agent
+router.post('/tickets/:id/transfer-to-human', async (req, res) => {
+    try {
+        const userId = (req as any).user.id;
+        const { id } = req.params;
+        const { reason } = req.body;
+
+        // Verify user owns the ticket
+        const { data: ticket, error: ticketError } = await supabase
+            .from('support_tickets')
+            .select('id, status, handler_mode, ticket_number')
+            .eq('id', id)
+            .eq('user_id', userId)
+            .single();
+
+        if (ticketError || !ticket) {
+            return res.status(404).json({ error: 'Ticket not found' });
+        }
+
+        if (ticket.status === 'closed') {
+            return res.status(400).json({ error: 'Cannot transfer a closed ticket' });
+        }
+
+        if (ticket.handler_mode === 'human') {
+            return res.status(400).json({ error: 'Ticket is already with a human agent' });
+        }
+
+        // Update ticket to hybrid mode and increase priority
+        const { error: updateError } = await supabase
+            .from('support_tickets')
+            .update({
+                handler_mode: 'hybrid',
+                status: 'open', // Ensure it's open for human pickup
+                priority: 'high', // Escalated tickets get high priority
+                escalated_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', id);
+
+        if (updateError) throw updateError;
+
+        // Add system message about transfer
+        const transferMessage = supportAiService.getTransferMessage();
+        const { data: systemMsg, error: msgError } = await supabase
+            .from('support_messages')
+            .insert({
+                ticket_id: id,
+                sender_id: userId,
+                message: transferMessage + (reason ? `\n\nReason: ${reason}` : ''),
+                is_from_admin: true,
+                message_type: 'system'
+            })
+            .select(`
+                *,
+                sender:users(id, full_name, avatar_url, role)
+            `)
+            .single();
+
+        if (msgError) console.error('Error creating transfer message:', msgError);
+
+        res.json({
+            success: true,
+            message: 'Ticket transferred to human support',
+            ticketNumber: ticket.ticket_number,
+            systemMessage: systemMsg
+        });
+    } catch (error) {
+        console.error('Error transferring to human:', error);
+        res.status(500).json({ error: 'Failed to transfer ticket' });
     }
 });
 
