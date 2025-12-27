@@ -511,6 +511,91 @@ router.post('/tests/suggest-details', async (req, res) => {
     }
 });
 
+// POST /api/admin/tests/bulk-rename
+// Rename all tests to new format: Topic - Subject - Exam
+router.post('/tests/bulk-rename', async (req, res) => {
+    try {
+        const { categoryId, dryRun = true } = req.body;
+
+        // Fetch tests (optionally filtered by category)
+        let testsQuery = supabase
+            .from('tests')
+            .select(`
+                id,
+                title,
+                exam_id,
+                subject_id,
+                exam:exams(id, name),
+                subject:subjects(id, name)
+            `);
+
+        if (categoryId) {
+            testsQuery = testsQuery.eq('test_category_id', categoryId);
+        }
+
+        const { data: tests, error: testsError } = await testsQuery;
+        if (testsError) throw testsError;
+
+        if (!tests || tests.length === 0) {
+            return res.json({ renamed: 0, results: [], message: 'No tests found' });
+        }
+
+        const { suggestTestDetails } = await import('../services/openai.js');
+        const results: { id: string; oldTitle: string; newTitle: string; status: string }[] = [];
+
+        for (const test of tests) {
+            try {
+                const examName = (test.exam as any)?.name || 'General';
+                const subjectName = (test.subject as any)?.name || 'General';
+
+                // Extract topic name from current title or use a generic placeholder
+                let topicName = 'Practice Test';
+
+                // Try to extract topic info - if title contains existing pattern, extract it
+                const currentTitle = test.title || '';
+
+                // Generate new title using AI
+                const result = await suggestTestDetails({
+                    examName,
+                    subjectName,
+                    topicNames: [topicName],
+                    customInstruction: `The current test title is "${currentTitle}". Extract the topic/focus from this title and format as: "Topic - ${subjectName} - ${examName}". Keep it concise.`
+                });
+
+                const newTitle = result.title;
+
+                if (!dryRun) {
+                    // Actually update the test
+                    const { error: updateError } = await supabase
+                        .from('tests')
+                        .update({ title: newTitle })
+                        .eq('id', test.id);
+
+                    if (updateError) {
+                        results.push({ id: test.id, oldTitle: currentTitle, newTitle, status: 'error: ' + updateError.message });
+                        continue;
+                    }
+                }
+
+                results.push({ id: test.id, oldTitle: currentTitle, newTitle, status: dryRun ? 'preview' : 'renamed' });
+            } catch (err: any) {
+                results.push({ id: test.id, oldTitle: test.title || '', newTitle: '', status: 'error: ' + err.message });
+            }
+        }
+
+        const renamedCount = results.filter(r => r.status === 'renamed' || r.status === 'preview').length;
+        res.json({
+            renamed: renamedCount,
+            total: tests.length,
+            dryRun,
+            results
+        });
+    } catch (error: any) {
+        console.error('Error bulk renaming tests:', error);
+        res.status(500).json({ error: 'Failed to bulk rename tests' });
+    }
+});
+
 // GET /api/admin/topics/by-exam-subject/:examSubjectId
 // Get topics for a specific exam-subject combination
 router.get('/topics/by-exam-subject/:examSubjectId', async (req, res) => {
@@ -831,6 +916,32 @@ router.delete('/question-concepts/:id', async (req, res) => {
 });
 
 // --- QUESTIONS ---
+
+// GET /api/admin/questions/by-topic/:topicId/ids
+// Get all question IDs for a topic (for bulk adding to tests)
+router.get('/questions/by-topic/:topicId/ids', async (req, res) => {
+    try {
+        const { topicId } = req.params;
+
+        const { data, error } = await supabase
+            .from('questions')
+            .select('id')
+            .eq('topic_id', topicId)
+            .eq('is_active', true);
+
+        if (error) throw error;
+
+        const questionIds = data?.map((q: any) => q.id) || [];
+        res.json({
+            topicId,
+            count: questionIds.length,
+            questionIds
+        });
+    } catch (error) {
+        console.error('Error fetching question IDs by topic:', error);
+        res.status(500).json({ error: 'Failed to fetch question IDs' });
+    }
+});
 
 // GET /api/admin/questions - List questions with pagination & filtering
 router.get('/questions', async (req, res) => {

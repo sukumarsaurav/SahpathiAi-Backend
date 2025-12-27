@@ -474,7 +474,9 @@ export async function suggestTestDetails(params: {
 
     const topicList = topicNames.map(t => `- ${t}`).join('\n');
 
-    const systemPrompt = `You are an expert exam coordinator. Your task is to generate a professional and descriptive title and description for a new test based on the selected syllabus.`;
+    const systemPrompt = `You are an expert exam coordinator. Your task is to generate a professional and descriptive title and description for a new test based on the selected syllabus.
+IMPORTANT: The title format MUST be: "Topic Name - Subject Name - Exam Name"
+Example: "Harappan Civilization - Ancient History - UPSC CSE"`;
 
     const userPrompt = `Generate a Title and Description for a test with the following configuration:
 
@@ -485,12 +487,16 @@ ${topicList}
 
 ${customInstruction ? `USER INSTRUCTION: ${customInstruction}` : ''}
 
-The title should be professional (e.g., "Advanced Algebra Assessment", "Mock Test: Thermodynamics").
+TITLE FORMAT (REQUIRED): "Topic Name - Subject Name - Exam Name"
+- If multiple topics: use the main/first topic name or a combined name
+- Example: "Mauryan Empire - Ancient History - UPSC CSE"
+- Example with multiple topics: "Medieval Kingdoms - Medieval History - SSC CGL"
+
 The description should briefly mention the scope and what students should expect.
 
 Respond with JSON:
 {
-  "title": "Test Title",
+  "title": "Topic Name - Subject Name - Exam Name",
   "description": "Test Description..."
 }`;
 
