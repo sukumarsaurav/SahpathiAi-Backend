@@ -356,7 +356,7 @@ router.delete('/exam-subjects/:id', async (req, res) => {
 // --- TOPICS ---
 
 // GET /api/admin/topics
-// Get topics for a specific subject (master list)
+// Get topics for a specific subject (master list), includes question count
 router.get('/topics', async (req, res) => {
     try {
         const { subjectId } = req.query;
@@ -366,9 +366,38 @@ router.get('/topics', async (req, res) => {
             query = query.eq('subject_id', subjectId);
         }
 
-        const { data, error } = await query;
+        const { data: topics, error } = await query;
         if (error) throw error;
-        res.json(data);
+
+        // Get question counts for all topics
+        if (topics && topics.length > 0) {
+            const topicIds = topics.map((t: any) => t.id);
+
+            // Get count of questions per topic
+            const { data: counts } = await supabase
+                .from('questions')
+                .select('topic_id')
+                .in('topic_id', topicIds)
+                .eq('is_active', true);
+
+            // Count questions per topic
+            const countMap: Record<string, number> = {};
+            if (counts) {
+                counts.forEach((q: any) => {
+                    countMap[q.topic_id] = (countMap[q.topic_id] || 0) + 1;
+                });
+            }
+
+            // Add question_count to each topic
+            const topicsWithCount = topics.map((t: any) => ({
+                ...t,
+                question_count: countMap[t.id] || 0
+            }));
+
+            return res.json(topicsWithCount);
+        }
+
+        res.json(topics || []);
     } catch (error) {
         console.error('Error fetching topics:', error);
         res.status(500).json({ error: 'Failed to fetch topics' });
@@ -1562,9 +1591,34 @@ router.put('/questions/:id', async (req, res) => {
 });
 
 // DELETE /api/admin/questions/:id
+// Use ?force=true to delete even if question has saves/attempts (development mode)
 router.delete('/questions/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        const { force } = req.query;
+
+        if (force === 'true') {
+            // Force delete: remove all related data first
+            // 1. Delete from saved_questions
+            await supabase.from('saved_questions').delete().eq('question_id', id);
+
+            // 2. Delete from user_question_attempts
+            await supabase.from('user_question_attempts').delete().eq('question_id', id);
+
+            // 3. Delete from test_questions
+            await supabase.from('test_questions').delete().eq('question_id', id);
+
+            // 4. Delete from question_translations
+            await supabase.from('question_translations').delete().eq('question_id', id);
+
+            // 5. Delete from question_exam_history
+            await supabase.from('question_exam_history').delete().eq('question_id', id);
+
+            // 6. Delete from question_concepts
+            await supabase.from('question_concepts').delete().eq('question_id', id);
+        }
+
+        // Finally delete the question
         const { error } = await supabase
             .from('questions')
             .delete()
@@ -3546,6 +3600,32 @@ router.delete('/tests/:id', async (req, res) => {
     } catch (error) {
         console.error('Error deleting test:', error);
         res.status(500).json({ error: 'Failed to delete test' });
+    }
+});
+
+// DELETE /api/admin/tests/bulk - Bulk delete tests
+router.delete('/tests/bulk', async (req, res) => {
+    try {
+        const { test_ids } = req.body;
+
+        if (!Array.isArray(test_ids) || test_ids.length === 0) {
+            return res.status(400).json({ error: 'test_ids array is required' });
+        }
+
+        // Delete test_questions links first
+        await supabase.from('test_questions').delete().in('test_id', test_ids);
+
+        // Delete the tests
+        const { error } = await supabase
+            .from('tests')
+            .delete()
+            .in('id', test_ids);
+
+        if (error) throw error;
+        res.json({ success: true, deleted: test_ids.length });
+    } catch (error) {
+        console.error('Error bulk deleting tests:', error);
+        res.status(500).json({ error: 'Failed to bulk delete tests' });
     }
 });
 
