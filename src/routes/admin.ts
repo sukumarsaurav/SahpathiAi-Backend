@@ -1616,6 +1616,9 @@ router.delete('/questions/:id', async (req, res) => {
 
             // 6. Delete from question_concepts
             await supabase.from('question_concepts').delete().eq('question_id', id);
+
+            // 7. Nullify marathon_sessions.last_question_id references
+            await supabase.from('marathon_sessions').update({ last_question_id: null }).eq('last_question_id', id);
         }
 
         // Finally delete the question
