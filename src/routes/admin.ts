@@ -3586,24 +3586,8 @@ router.put('/tests/:id', async (req, res) => {
     }
 });
 
-// DELETE /api/admin/tests/:id
-router.delete('/tests/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { error } = await supabase
-            .from('tests')
-            .delete()
-            .eq('id', id);
-
-        if (error) throw error;
-        res.json({ success: true });
-    } catch (error) {
-        console.error('Error deleting test:', error);
-        res.status(500).json({ error: 'Failed to delete test' });
-    }
-});
-
 // DELETE /api/admin/tests/bulk - Bulk delete tests
+// IMPORTANT: This route MUST come before /tests/:id to prevent Express from matching "bulk" as a UUID
 router.delete('/tests/bulk', async (req, res) => {
     try {
         const { test_ids } = req.body;
@@ -3626,6 +3610,23 @@ router.delete('/tests/bulk', async (req, res) => {
     } catch (error) {
         console.error('Error bulk deleting tests:', error);
         res.status(500).json({ error: 'Failed to bulk delete tests' });
+    }
+});
+
+// DELETE /api/admin/tests/:id
+router.delete('/tests/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { error } = await supabase
+            .from('tests')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting test:', error);
+        res.status(500).json({ error: 'Failed to delete test' });
     }
 });
 
