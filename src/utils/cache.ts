@@ -9,10 +9,18 @@ const REDIS_CONFIG = {
     port: parseInt(process.env.REDIS_PORT || '6379'),
 };
 
+// Set DISABLE_CACHE=true to completely bypass Redis (helpful in development)
+const CACHE_DISABLED = process.env.DISABLE_CACHE === 'true';
+
 let client: RedisClientType | null = null;
 
 // Initialize Redis connection
 async function initRedis(): Promise<RedisClientType | null> {
+    if (CACHE_DISABLED) {
+        console.log('⚠️ Cache disabled via DISABLE_CACHE=true');
+        return null;
+    }
+
     if (!REDIS_CONFIG.password || !REDIS_CONFIG.host) {
         console.log('⚠️ Redis not configured - caching disabled');
         return null;

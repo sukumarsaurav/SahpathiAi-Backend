@@ -3441,6 +3441,11 @@ router.post('/test-categories', async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Invalidate test categories cache
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(cache.KEYS.testCategories());
+
         res.status(201).json(data);
     } catch (error) {
         console.error('Error creating test category:', error);
@@ -3459,6 +3464,11 @@ router.put('/test-categories/:id', async (req, res) => {
             .eq('id', id);
 
         if (error) throw error;
+
+        // Invalidate test categories cache
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(cache.KEYS.testCategories());
+
         res.json({ success: true });
     } catch (error) {
         console.error('Error updating test category:', error);
@@ -3476,6 +3486,11 @@ router.delete('/test-categories/:id', async (req, res) => {
             .eq('id', id);
 
         if (error) throw error;
+
+        // Invalidate test categories cache
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(cache.KEYS.testCategories());
+
         res.json({ success: true });
     } catch (error) {
         console.error('Error deleting test category:', error);
@@ -3564,6 +3579,14 @@ router.post('/tests', async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        // Invalidate related caches
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(
+            cache.KEYS.testCategories(),
+            cache.KEYS.testsByCategory(test_category_id)
+        );
+
         res.status(201).json(data);
     } catch (error) {
         console.error('Error creating test:', error);
@@ -3582,6 +3605,15 @@ router.put('/tests/:id', async (req, res) => {
             .eq('id', id);
 
         if (error) throw error;
+
+        // Invalidate related caches
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(
+            cache.KEYS.testCategories(),
+            cache.KEYS.testsByCategory(test_category_id),
+            cache.KEYS.testWithQuestions(id)
+        );
+
         res.json({ success: true });
     } catch (error) {
         console.error('Error updating test:', error);
@@ -3609,6 +3641,11 @@ router.delete('/tests/bulk', async (req, res) => {
             .in('id', test_ids);
 
         if (error) throw error;
+
+        // Invalidate test categories cache (to update counts)
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(cache.KEYS.testCategories());
+
         res.json({ success: true, deleted: test_ids.length });
     } catch (error) {
         console.error('Error bulk deleting tests:', error);
@@ -3626,6 +3663,11 @@ router.delete('/tests/:id', async (req, res) => {
             .eq('id', id);
 
         if (error) throw error;
+
+        // Invalidate test categories cache (to update counts)
+        const { cache } = await import('../utils/cache.js');
+        await cache.invalidate(cache.KEYS.testCategories());
+
         res.json({ success: true });
     } catch (error) {
         console.error('Error deleting test:', error);
