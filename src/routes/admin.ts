@@ -634,6 +634,131 @@ router.post('/tests/bulk-rename', async (req, res) => {
     }
 });
 
+// POST /api/admin/tests/fix-subject-ids
+// Fix existing tests that have master subject_id instead of exam_subject.id
+// This is needed because tests were incorrectly saved with the master subject UUID
+// instead of the exam_subject junction table ID
+router.post('/tests/fix-subject-ids', async (req, res) => {
+    try {
+        const { dryRun = true } = req.body;
+
+        // Get all tests that have a subject_id set
+        const { data: tests, error: testsError } = await supabase
+            .from('tests')
+            .select('id, title, exam_id, subject_id')
+            .not('subject_id', 'is', null);
+
+        if (testsError) throw testsError;
+
+        if (!tests || tests.length === 0) {
+            return res.json({ fixed: 0, skipped: 0, errors: 0, message: 'No tests with subject_id found' });
+        }
+
+        // Get all exam_subjects for mapping
+        const { data: examSubjects, error: esError } = await supabase
+            .from('exam_subjects')
+            .select('id, exam_id, subject_id');
+
+        if (esError) throw esError;
+
+        // Build a quick lookup: (exam_id, master_subject_id) -> exam_subject.id
+        const esLookup = new Map<string, string>();
+        (examSubjects || []).forEach((es: any) => {
+            const key = `${es.exam_id}:${es.subject_id}`;
+            esLookup.set(key, es.id);
+        });
+
+        // Also check which subject_ids are already exam_subject IDs (valid)
+        const validExamSubjectIds = new Set((examSubjects || []).map((es: any) => es.id));
+
+        const results: { id: string; title: string; oldSubjectId: string; newSubjectId: string | null; status: string }[] = [];
+        let fixedCount = 0;
+        let skippedCount = 0;
+        let errorCount = 0;
+
+        for (const test of tests) {
+            const testSubjectId = test.subject_id;
+
+            // Check if the current subject_id is already a valid exam_subject.id
+            if (validExamSubjectIds.has(testSubjectId)) {
+                results.push({
+                    id: test.id,
+                    title: test.title,
+                    oldSubjectId: testSubjectId,
+                    newSubjectId: testSubjectId,
+                    status: 'already_correct'
+                });
+                skippedCount++;
+                continue;
+            }
+
+            // Current subject_id is a master subject UUID - find the correct exam_subject.id
+            const lookupKey = `${test.exam_id}:${testSubjectId}`;
+            const correctExamSubjectId = esLookup.get(lookupKey);
+
+            if (!correctExamSubjectId) {
+                // Could not find a matching exam_subject
+                results.push({
+                    id: test.id,
+                    title: test.title,
+                    oldSubjectId: testSubjectId,
+                    newSubjectId: null,
+                    status: 'no_mapping_found'
+                });
+                errorCount++;
+                continue;
+            }
+
+            if (!dryRun) {
+                // Update the test with the correct exam_subject.id
+                const { error: updateError } = await supabase
+                    .from('tests')
+                    .update({ subject_id: correctExamSubjectId })
+                    .eq('id', test.id);
+
+                if (updateError) {
+                    results.push({
+                        id: test.id,
+                        title: test.title,
+                        oldSubjectId: testSubjectId,
+                        newSubjectId: correctExamSubjectId,
+                        status: 'error: ' + updateError.message
+                    });
+                    errorCount++;
+                    continue;
+                }
+            }
+
+            results.push({
+                id: test.id,
+                title: test.title,
+                oldSubjectId: testSubjectId,
+                newSubjectId: correctExamSubjectId,
+                status: dryRun ? 'will_fix' : 'fixed'
+            });
+            fixedCount++;
+        }
+
+        // Invalidate caches if we made changes
+        if (!dryRun && fixedCount > 0) {
+            const { cache } = await import('../utils/cache.js');
+            await cache.invalidate(cache.KEYS.testCategories());
+        }
+
+        res.json({
+            total: tests.length,
+            fixed: fixedCount,
+            skipped: skippedCount,
+            errors: errorCount,
+            dryRun,
+            results
+        });
+    } catch (error: any) {
+        console.error('Error fixing test subject IDs:', error);
+        res.status(500).json({ error: 'Failed to fix test subject IDs' });
+    }
+});
+
 // GET /api/admin/topics/by-exam-subject/:examSubjectId
 // Get topics for a specific exam-subject combination
 router.get('/topics/by-exam-subject/:examSubjectId', async (req, res) => {
