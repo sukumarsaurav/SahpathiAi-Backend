@@ -1,7 +1,9 @@
 import { createClient, RedisClientType } from 'redis';
 
-// Redis Labs connection (30MB free tier)
-// Configuration from environment or defaults
+// Redis configuration - supports both URL format (Upstash/Vercel) and separate config
+const REDIS_URL = process.env.REDIS_URL || process.env.KV_URL;
+
+// Legacy configuration (fallback)
 const REDIS_CONFIG = {
     username: process.env.REDIS_USERNAME || 'default',
     password: process.env.REDIS_PASSWORD,
@@ -21,6 +23,23 @@ async function initRedis(): Promise<RedisClientType | null> {
         return null;
     }
 
+    // Check if we have a connection URL (preferred for Upstash/Vercel)
+    if (REDIS_URL) {
+        try {
+            const redisClient = createClient({ url: REDIS_URL });
+
+            redisClient.on('error', (err) => console.error('❌ Redis error:', err.message));
+            redisClient.on('connect', () => console.log('✅ Redis connected via URL'));
+
+            await redisClient.connect();
+            return redisClient as RedisClientType;
+        } catch (err) {
+            console.error('❌ Redis URL connection failed:', err);
+            return null;
+        }
+    }
+
+    // Fallback to legacy separate config
     if (!REDIS_CONFIG.password || !REDIS_CONFIG.host) {
         console.log('⚠️ Redis not configured - caching disabled');
         return null;

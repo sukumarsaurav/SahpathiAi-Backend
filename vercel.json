@@ -1,0 +1,58 @@
+{
+    "version": 2,
+    "regions": [
+        "bom1"
+    ],
+    "buildCommand": "",
+    "outputDirectory": "",
+    "framework": null,
+    "functions": {
+        "api/index.ts": {
+            "memory": 1024,
+            "maxDuration": 30
+        }
+    },
+    "rewrites": [
+        {
+            "source": "/health",
+            "destination": "/api"
+        },
+        {
+            "source": "/api/(.*)",
+            "destination": "/api"
+        },
+        {
+            "source": "/(.*)",
+            "destination": "/api"
+        }
+    ],
+    "headers": [
+        {
+            "source": "/api/cache-version",
+            "headers": [
+                {
+                    "key": "Cache-Control",
+                    "value": "public, s-maxage=60, stale-while-revalidate=300"
+                }
+            ]
+        },
+        {
+            "source": "/api/languages",
+            "headers": [
+                {
+                    "key": "Cache-Control",
+                    "value": "public, s-maxage=3600, stale-while-revalidate=86400"
+                }
+            ]
+        },
+        {
+            "source": "/api/exams",
+            "headers": [
+                {
+                    "key": "Cache-Control",
+                    "value": "public, s-maxage=3600, stale-while-revalidate=86400"
+                }
+            ]
+        }
+    ]
+}

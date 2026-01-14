@@ -49,6 +49,8 @@ app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({
     origin: [
+        'https://sahpathiai.com',
+        'https://www.sahpathiai.com',
         'https://sahpathi-ai.vercel.app',
         'https://sahpathi.ai',
         'http://localhost:5173',
@@ -145,9 +147,13 @@ app.use((req, res) => {
     res.status(404).json({ error: 'Not Found', path: req.path });
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Sahpathi API Server running on port ${PORT}`);
-    console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+// Only start server in non-Vercel environment (local development)
+if (!process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`🚀 Sahpathi API Server running on port ${PORT}`);
+        console.log(`📚 Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+}
 
 export default app;
+
